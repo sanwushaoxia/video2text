@@ -1,0 +1,5 @@
+openai-whisper>=20231117
+torch
+torchaudio
+numpy
+tqdm
