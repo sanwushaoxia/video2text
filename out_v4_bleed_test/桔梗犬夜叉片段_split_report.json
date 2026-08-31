@@ -1,0 +1,812 @@
+{
+  "vocals": "C:\\Users\\13988\\Code\\video2text\\out_v4\\桔梗犬夜叉片段_vocals.wav",
+  "split_mode": "srt_f0",
+  "gender_backend": "slice",
+  "f0_threshold": 200.0,
+  "adaptive_threshold": true,
+  "srt": "C:\\Users\\13988\\Code\\video2text\\桔梗犬夜叉片段_whisper\\桔梗犬夜叉片段.srt",
+  "srt_segment_count": 29,
+  "speaker_map": "C:\\Users\\13988\\Code\\video2text\\桔梗犬夜叉片段_whisper\\speaker_map.json",
+  "speaker_map_override_count": 29,
+  "slice_pad_ms": 120,
+  "slice_pad_end_ms": 120,
+  "align_short_segments": true,
+  "fill_gap_ms": 400,
+  "shout_min_ms": 600,
+  "shout_tail_pad_ms": 250,
+  "shout_all_islands": false,
+  "recover_window_vocals": true,
+  "gap_fill_count": 1,
+  "f0_threshold_requested": 200.0,
+  "f0_threshold_used": 140.0,
+  "coverage_sec": 158.43,
+  "segment_count": 29,
+  "low_confidence_count": 1,
+  "segments": [
+    {
+      "index": "1",
+      "start": 2.0,
+      "end": 5.0,
+      "duration": 3.0,
+      "gender": "female",
+      "f0_hz": 218.6,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "你还记得吗犬夜叉",
+      "confidence": 0.95,
+      "aligned_start": 1.85,
+      "aligned_end": 5.12,
+      "srt_start": 2.0,
+      "srt_end": 5.0,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 1.88,
+          "end": 3.2
+        },
+        {
+          "start": 3.53,
+          "end": 4.16
+        },
+        {
+          "start": 5.06,
+          "end": 5.12
+        }
+      ]
+    },
+    {
+      "index": "2",
+      "start": 5.0,
+      "end": 9.5,
+      "duration": 4.5,
+      "gender": "female",
+      "f0_hz": 199.8,
+      "voiced_ratio": 1.0,
+      "reason": "F0=200Hz + speaker_map",
+      "text": "在我们被奈落离间的很久之前",
+      "confidence": 0.65,
+      "aligned_start": 5.0,
+      "aligned_end": 9.5,
+      "align_cue_type": "none"
+    },
+    {
+      "index": "3",
+      "start": 9.5,
+      "end": 14.0,
+      "duration": 4.5,
+      "gender": "female",
+      "f0_hz": 261.4,
+      "voiced_ratio": 1.0,
+      "reason": "F0=261Hz + speaker_map",
+      "text": "犬夜叉你要用四魂之玉变成凡人吗",
+      "confidence": 0.88,
+      "aligned_start": 9.5,
+      "aligned_end": 14.0,
+      "align_cue_type": "none"
+    },
+    {
+      "index": "4",
+      "start": 14.0,
+      "end": 18.5,
+      "duration": 4.5,
+      "gender": "male",
+      "f0_hz": 206.9,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "我变成凡人的话你会怎么样",
+      "confidence": 0.95,
+      "aligned_start": 13.85,
+      "aligned_end": 18.62,
+      "srt_start": 14.0,
+      "srt_end": 18.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 13.88,
+          "end": 17.39
+        },
+        {
+          "start": 18.08,
+          "end": 18.62
+        }
+      ]
+    },
+    {
+      "index": "5",
+      "start": 18.5,
+      "end": 20.5,
+      "duration": 2.0,
+      "gender": "female",
+      "f0_hz": 216.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "我本就是守玉之人",
+      "confidence": 0.95,
+      "aligned_start": 18.35,
+      "aligned_end": 20.62,
+      "srt_start": 18.5,
+      "srt_end": 20.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 18.38,
+          "end": 19.91
+        },
+        {
+          "start": 20.57,
+          "end": 20.62
+        }
+      ]
+    },
+    {
+      "index": "6",
+      "start": 20.5,
+      "end": 23.0,
+      "duration": 2.5,
+      "gender": "female",
+      "f0_hz": 211.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "若是玉不在了",
+      "confidence": 0.95,
+      "aligned_start": 20.5,
+      "aligned_end": 23.0,
+      "srt_start": 20.5,
+      "srt_end": 23.0,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 20.38,
+          "end": 21.82
+        }
+      ]
+    },
+    {
+      "index": "7",
+      "start": 23.0,
+      "end": 26.5,
+      "duration": 3.5,
+      "gender": "female",
+      "f0_hz": 213.6,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "我会成为平凡的女人",
+      "confidence": 0.95,
+      "aligned_start": 22.85,
+      "aligned_end": 26.62,
+      "srt_start": 23.0,
+      "srt_end": 26.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 22.88,
+          "end": 24.5
+        },
+        {
+          "start": 26.39,
+          "end": 26.62
+        }
+      ]
+    },
+    {
+      "index": "8",
+      "start": 26.5,
+      "end": 28.5,
+      "duration": 2.0,
+      "gender": "male",
+      "f0_hz": 97.4,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "我怎么可能忘记",
+      "confidence": 0.95,
+      "aligned_start": 26.5,
+      "aligned_end": 28.5,
+      "srt_start": 26.5,
+      "srt_end": 28.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 26.38,
+          "end": 27.34
+        }
+      ]
+    },
+    {
+      "index": "9",
+      "start": 28.5,
+      "end": 34.5,
+      "duration": 6.0,
+      "gender": "male",
+      "f0_hz": 115.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "要是那时候我变成凡人和你一起生活下去的话",
+      "confidence": 0.95,
+      "aligned_start": 28.35,
+      "aligned_end": 34.62,
+      "srt_start": 28.5,
+      "srt_end": 34.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 28.38,
+          "end": 30.48
+        },
+        {
+          "start": 30.96,
+          "end": 32.58
+        },
+        {
+          "start": 34.56,
+          "end": 34.62
+        }
+      ]
+    },
+    {
+      "index": "10",
+      "start": 34.5,
+      "end": 38.5,
+      "duration": 4.0,
+      "gender": "female",
+      "f0_hz": 255.5,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "我终于成为平凡的女人了",
+      "confidence": 0.95,
+      "aligned_start": 34.35,
+      "aligned_end": 37.47,
+      "srt_start": 34.5,
+      "srt_end": 38.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 34.38,
+          "end": 35.28
+        },
+        {
+          "start": 35.76,
+          "end": 37.47
+        }
+      ]
+    },
+    {
+      "index": "11",
+      "start": 38.5,
+      "end": 45.5,
+      "duration": 7.0,
+      "gender": "male",
+      "f0_hz": 122.0,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "桔梗你是我第一个喜欢的重要的女人",
+      "confidence": 0.95,
+      "aligned_start": 38.35,
+      "aligned_end": 44.92,
+      "srt_start": 38.5,
+      "srt_end": 45.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 38.38,
+          "end": 39.22
+        },
+        {
+          "start": 40.15,
+          "end": 44.92
+        }
+      ]
+    },
+    {
+      "index": "12",
+      "start": 45.5,
+      "end": 48.5,
+      "duration": 3.0,
+      "gender": "male",
+      "f0_hz": 222.4,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "可是",
+      "confidence": 0.95,
+      "aligned_start": 45.5,
+      "aligned_end": 48.5,
+      "srt_start": 45.5,
+      "srt_end": 48.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 45.38,
+          "end": 46.49
+        }
+      ]
+    },
+    {
+      "index": "13",
+      "start": 48.5,
+      "end": 52.5,
+      "duration": 4.0,
+      "gender": "male",
+      "f0_hz": 241.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "我却没能为你做什么",
+      "confidence": 0.95,
+      "aligned_start": 48.35,
+      "aligned_end": 52.62,
+      "srt_start": 48.5,
+      "srt_end": 52.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 48.38,
+          "end": 50.12
+        },
+        {
+          "start": 52.34,
+          "end": 52.62
+        }
+      ]
+    },
+    {
+      "index": "14",
+      "start": 52.5,
+      "end": 54.0,
+      "duration": 1.5,
+      "gender": "female",
+      "f0_hz": 357.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "第一次看到",
+      "confidence": 0.95,
+      "aligned_start": 52.5,
+      "aligned_end": 54.0,
+      "srt_start": 52.5,
+      "srt_end": 54.0,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 52.38,
+          "end": 53.1
+        }
+      ]
+    },
+    {
+      "index": "15",
+      "start": 54.0,
+      "end": 59.5,
+      "duration": 5.5,
+      "gender": "female",
+      "f0_hz": 258.4,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "犬夜叉你哭起来是这个样子啊",
+      "confidence": 0.95,
+      "aligned_start": 53.85,
+      "aligned_end": 59.62,
+      "srt_start": 54.0,
+      "srt_end": 59.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 53.88,
+          "end": 54.87
+        },
+        {
+          "start": 55.59,
+          "end": 58.17
+        },
+        {
+          "start": 59.19,
+          "end": 59.62
+        }
+      ]
+    },
+    {
+      "index": "16",
+      "start": 59.5,
+      "end": 61.5,
+      "duration": 2.0,
+      "gender": "male",
+      "f0_hz": 295.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "一桔梗我...",
+      "confidence": 0.95,
+      "aligned_start": 59.35,
+      "aligned_end": 61.62,
+      "srt_start": 59.5,
+      "srt_end": 61.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 59.38,
+          "end": 61.62
+        }
+      ]
+    },
+    {
+      "index": "17",
+      "start": 61.5,
+      "end": 64.5,
+      "duration": 3.0,
+      "gender": "male",
+      "f0_hz": 238.3,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "我没能救你",
+      "confidence": 0.95,
+      "aligned_start": 61.35,
+      "aligned_end": 64.62,
+      "srt_start": 61.5,
+      "srt_end": 64.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 61.38,
+          "end": 63.66
+        },
+        {
+          "start": 64.41,
+          "end": 64.62
+        }
+      ]
+    },
+    {
+      "index": "18",
+      "start": 64.5,
+      "end": 70.0,
+      "duration": 5.5,
+      "gender": "female",
+      "f0_hz": null,
+      "voiced_ratio": 0.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "但是你来了",
+      "confidence": 0.95,
+      "aligned_start": 64.35,
+      "aligned_end": 70.12,
+      "srt_start": 64.5,
+      "srt_end": 70.0,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 64.38,
+          "end": 66.66
+        },
+        {
+          "start": 69.99,
+          "end": 70.12
+        }
+      ]
+    },
+    {
+      "index": "19",
+      "start": 70.0,
+      "end": 73.0,
+      "duration": 3.0,
+      "gender": "female",
+      "f0_hz": 309.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "这样就够了",
+      "confidence": 0.95,
+      "aligned_start": 69.85,
+      "aligned_end": 73.12,
+      "srt_start": 70.0,
+      "srt_end": 73.0,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 69.88,
+          "end": 70.96
+        },
+        {
+          "start": 72.91,
+          "end": 73.12
+        }
+      ]
+    },
+    {
+      "index": "20",
+      "start": 73.0,
+      "end": 83.0,
+      "duration": 10.0,
+      "gender": "male",
+      "f0_hz": 235.6,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "桔梗",
+      "confidence": 0.95,
+      "aligned_start": 72.88,
+      "aligned_end": 83.12,
+      "srt_start": 73.0,
+      "srt_end": 83.0,
+      "align_cue_type": "shout",
+      "speech_islands": [
+        {
+          "start": 72.88,
+          "end": 73.48
+        },
+        {
+          "start": 83.02,
+          "end": 83.12
+        }
+      ]
+    },
+    {
+      "index": "21",
+      "start": 83.0,
+      "end": 92.5,
+      "duration": 9.5,
+      "gender": "female",
+      "f0_hz": 283.4,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "犬夜叉",
+      "confidence": 0.95,
+      "aligned_start": 82.88,
+      "aligned_end": 92.62,
+      "srt_start": 83.0,
+      "srt_end": 92.5,
+      "align_cue_type": "shout",
+      "speech_islands": [
+        {
+          "start": 82.88,
+          "end": 83.84
+        },
+        {
+          "start": 90.65,
+          "end": 90.92
+        },
+        {
+          "start": 92.6,
+          "end": 92.62
+        }
+      ]
+    },
+    {
+      "index": "22",
+      "start": 92.5,
+      "end": 117.0,
+      "duration": 24.5,
+      "gender": "male",
+      "f0_hz": 209.9,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "桔梗",
+      "confidence": 0.95,
+      "aligned_start": 92.38,
+      "aligned_end": 105.11,
+      "srt_start": 92.5,
+      "srt_end": 117.0,
+      "align_cue_type": "shout",
+      "speech_islands": [
+        {
+          "start": 92.38,
+          "end": 93.25
+        },
+        {
+          "start": 96.46,
+          "end": 97.6
+        },
+        {
+          "start": 103.36,
+          "end": 103.66
+        },
+        {
+          "start": 104.14,
+          "end": 104.86
+        }
+      ]
+    },
+    {
+      "index": "23",
+      "start": 117.0,
+      "end": 118.5,
+      "duration": 1.5,
+      "gender": "male",
+      "f0_hz": 96.2,
+      "voiced_ratio": 1.0,
+      "reason": "F0=96Hz + speaker_map",
+      "text": "这光芒是...",
+      "confidence": 0.42,
+      "aligned_start": 117.19,
+      "aligned_end": 118.03,
+      "srt_start": 117.0,
+      "srt_end": 118.5,
+      "align_cue_type": "short_dialogue",
+      "speech_islands": [
+        {
+          "start": 116.88,
+          "end": 118.2
+        }
+      ]
+    },
+    {
+      "index": "24",
+      "start": 118.5,
+      "end": 121.0,
+      "duration": 2.5,
+      "gender": "female",
+      "f0_hz": 255.5,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "桔梗的灵魂",
+      "confidence": 0.95,
+      "aligned_start": 118.35,
+      "aligned_end": 121.12,
+      "srt_start": 118.5,
+      "srt_end": 121.0,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 118.38,
+          "end": 119.94
+        },
+        {
+          "start": 121.05,
+          "end": 121.12
+        }
+      ]
+    },
+    {
+      "index": "25",
+      "start": 121.0,
+      "end": 129.0,
+      "duration": 8.0,
+      "gender": "female",
+      "f0_hz": 310.9,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "就像跟我们告别一样",
+      "confidence": 0.95,
+      "aligned_start": 121.0,
+      "aligned_end": 129.0,
+      "srt_start": 121.0,
+      "srt_end": 129.0,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 120.88,
+          "end": 121.66
+        },
+        {
+          "start": 121.99,
+          "end": 123.43
+        }
+      ]
+    },
+    {
+      "index": "26",
+      "start": 129.0,
+      "end": 142.5,
+      "duration": 13.5,
+      "gender": "female",
+      "f0_hz": 80.0,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "好温暖",
+      "confidence": 0.95,
+      "aligned_start": 129.0,
+      "aligned_end": 142.5,
+      "srt_start": 129.0,
+      "srt_end": 142.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 128.88,
+          "end": 129.93
+        }
+      ]
+    },
+    {
+      "index": "27",
+      "start": 142.5,
+      "end": 145.0,
+      "duration": 2.5,
+      "gender": "female",
+      "f0_hz": 245.3,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "犬夜叉",
+      "confidence": 0.95,
+      "aligned_start": 142.38,
+      "aligned_end": 143.59,
+      "srt_start": 142.5,
+      "srt_end": 145.0,
+      "align_cue_type": "shout",
+      "speech_islands": [
+        {
+          "start": 142.38,
+          "end": 143.34
+        },
+        {
+          "start": 144.84,
+          "end": 145.12
+        }
+      ]
+    },
+    {
+      "index": "28",
+      "start": 145.0,
+      "end": 150.5,
+      "duration": 5.5,
+      "gender": "male",
+      "f0_hz": 133.8,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "桔梗让我们不要伤心",
+      "confidence": 0.95,
+      "aligned_start": 144.85,
+      "aligned_end": 150.62,
+      "srt_start": 145.0,
+      "srt_end": 150.5,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 144.88,
+          "end": 145.51
+        },
+        {
+          "start": 146.35,
+          "end": 147.49
+        },
+        {
+          "start": 150.28,
+          "end": 150.62
+        }
+      ]
+    },
+    {
+      "index": "29",
+      "start": 150.5,
+      "end": 160.43,
+      "duration": 9.93,
+      "gender": "male",
+      "f0_hz": 159.1,
+      "voiced_ratio": 1.0,
+      "reason": "text_hint (strong) + speaker_map",
+      "text": "她会一直保佑我们",
+      "confidence": 0.95,
+      "aligned_start": 150.5,
+      "aligned_end": 160.43,
+      "srt_start": 150.5,
+      "srt_end": 160.43,
+      "align_cue_type": "phrase_long_window",
+      "speech_islands": [
+        {
+          "start": 150.38,
+          "end": 150.86
+        },
+        {
+          "start": 152.54,
+          "end": 153.53
+        }
+      ]
+    },
+    {
+      "start": 118.03,
+      "end": 118.35,
+      "gender": "male",
+      "index": 30,
+      "text": "",
+      "reason": "gap_fill",
+      "confidence": 0.35,
+      "aligned_start": 118.03,
+      "aligned_end": 118.35,
+      "gap_fill": true,
+      "f0_hz": null,
+      "voiced_ratio": null
+    }
+  ],
+  "stats": {
+    "male_segments": 14,
+    "female_segments": 16,
+    "male_audio_sec": 83.25,
+    "female_audio_sec": 75.5,
+    "labeled_coverage_sec": 158.43,
+    "vocals_duration_sec": 160.4,
+    "coverage_ratio": 0.988,
+    "low_confidence_count": 2,
+    "stem_assigned_sec": 144.83,
+    "unassigned_vocal_sec": 0.05
+  }
+}
