@@ -1,0 +1,17 @@
+# BS-RoFormer vocal separation (separator-backend=bs_roformer 可选)
+# Python >= 3.10
+#
+# GPU (推荐):
+#   pip install "audio-separator[gpu]"
+# CPU:
+#   pip install "audio-separator[cpu]"
+#
+# 新建独立环境 (示例):
+#   bash scripts/setup_bs_roformer_env.sh video2text-roformer
+#   conda activate video2text-roformer
+#
+# 推荐整包安装（含 onnxruntime）:
+#   pip install "audio-separator[gpu]"   # CUDA
+#   pip install "audio-separator[cpu]"
+audio-separator[gpu]>=0.47.0
+audioread>=3.0.0

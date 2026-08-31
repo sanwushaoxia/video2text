@@ -79,6 +79,44 @@ def main(argv=None) -> int:
         help="Demucs shifts 次数 (>=2 更慢但更准, 默认 1)",
     )
     p.add_argument(
+        "--separator-backend",
+        choices=["demucs", "bs_roformer"],
+        default="bs_roformer",
+        help="人声/背景分离后端 (默认 bs_roformer ensemble; 回退用 demucs)",
+    )
+    p.add_argument(
+        "--roformer-model",
+        default="model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+        help="BS-RoFormer 模型 ckpt (roformer-mode=single)",
+    )
+    p.add_argument(
+        "--roformer-mode",
+        choices=["single", "dual", "ensemble"],
+        default="ensemble",
+        help="RoFormer 分离模式 (默认 ensemble 专保伴奏)",
+    )
+    p.add_argument(
+        "--roformer-ensemble-preset",
+        default="instrumental_full",
+        help="ensemble preset (默认 instrumental_full 最大保伴奏)",
+    )
+    p.add_argument(
+        "--roformer-vocals-model",
+        default="bs_roformer_vocals_revive_v3e_unwa.ckpt",
+        help="dual 模式 vocals 模型 (默认 revive v3e)",
+    )
+    p.add_argument(
+        "--roformer-inst-model",
+        default="mel_band_roformer_instrumental_fv7z_gabox.ckpt",
+        help="dual 模式 instrumental 模型 (默认 fv7z bleedless)",
+    )
+    p.add_argument(
+        "--roformer-overlap",
+        type=int,
+        default=None,
+        help="MDXC overlap 窗口数 (默认模型 yaml 值, 提高如 16 可增质量)",
+    )
+    p.add_argument(
         "--whisper-model",
         default="base",
         help="split-mode=whisper_f0 时的 Whisper 模型 (默认 base)",
@@ -169,6 +207,42 @@ def main(argv=None) -> int:
         default=None,
         help="从 no_vocals 回收 Demucs 泄漏语声并清理背景轨 (srt_f0 默认开启)",
     )
+    p.add_argument(
+        "--bleed-leak-ratio",
+        type=float,
+        default=0.70,
+        help="泄漏回收: no_vocals 超出 vocals 的比例阈值 (默认 0.70)",
+    )
+    p.add_argument(
+        "--bleed-island-threshold",
+        type=float,
+        default=0.12,
+        help="泄漏回收 fallback VAD 能量比阈值 (默认 0.12)",
+    )
+    p.add_argument(
+        "--bleed-min-nv-voc-ratio",
+        type=float,
+        default=1.5,
+        help="段级泄漏判定: no_vocals/vocals RMS 比下限 (默认 1.5)",
+    )
+    p.add_argument(
+        "--bleed-min-excess-ratio",
+        type=float,
+        default=0.15,
+        help="样本转移: excess 占 no_vocals 幅度比下限 (默认 0.15)",
+    )
+    p.add_argument(
+        "--bleed-bgm-attenuate",
+        type=float,
+        default=0.85,
+        help="从 no_vocals 减去的泄漏增益 (默认 0.85, 越小越保守)",
+    )
+    p.add_argument(
+        "--bleed-fade-ms",
+        type=float,
+        default=8.0,
+        help="语声岛边界 crossfade 毫秒 (默认 8)",
+    )
     p.add_argument("--ffmpeg", default=None)
     p.add_argument("--ffprobe", default=None)
     args = p.parse_args(argv)
@@ -209,6 +283,15 @@ def main(argv=None) -> int:
             )
             return 1
 
+    roformer_kwargs = {
+        "roformer_model": args.roformer_model,
+        "roformer_mode": args.roformer_mode,
+        "roformer_ensemble_preset": args.roformer_ensemble_preset,
+        "roformer_vocals_model": args.roformer_vocals_model,
+        "roformer_inst_model": args.roformer_inst_model,
+        "roformer_overlap": args.roformer_overlap,
+    }
+
     with tempfile.TemporaryDirectory(prefix="v2t_stems_") as tmp:
         work = Path(tmp)
         if src.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}:
@@ -237,8 +320,15 @@ def main(argv=None) -> int:
                     min_speakers=args.min_speakers,
                     max_speakers=args.max_speakers,
                     hf_token=args.hf_token,
+                    separator_backend=args.separator_backend,
                     demucs_model=args.demucs_model,
                     demucs_shifts=max(1, args.demucs_shifts),
+                    roformer_model=args.roformer_model,
+                    roformer_mode=args.roformer_mode,
+                    roformer_ensemble_preset=args.roformer_ensemble_preset,
+                    roformer_vocals_model=args.roformer_vocals_model,
+                    roformer_inst_model=args.roformer_inst_model,
+                    roformer_overlap=args.roformer_overlap,
                     slice_pad_ms=max(0, args.slice_pad_ms),
                     slice_pad_end_ms=args.slice_pad_end_ms,
                     align_short_segments=args.align_short_segments,
@@ -253,18 +343,40 @@ def main(argv=None) -> int:
                         else None
                     ),
                     recover_vocal_bleed=args.recover_vocal_bleed,
+                    bleed_leak_ratio=args.bleed_leak_ratio,
+                    bleed_island_threshold=args.bleed_island_threshold,
+                    bleed_min_nv_voc_ratio=args.bleed_min_nv_voc_ratio,
+                    bleed_min_excess_ratio=args.bleed_min_excess_ratio,
+                    bleed_bgm_attenuate=args.bleed_bgm_attenuate,
+                    bleed_fade_ms=args.bleed_fade_ms,
                 )
             except (RuntimeError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
             return 0
 
-        print("Demucs 人声分离...")
+        if args.separator_backend == "bs_roformer":
+            if args.roformer_mode == "ensemble":
+                backend_label = (
+                    f"BS-RoFormer ensemble ({args.roformer_ensemble_preset})"
+                )
+            elif args.roformer_mode == "dual":
+                backend_label = (
+                    f"BS-RoFormer dual (voc={args.roformer_vocals_model}, "
+                    f"inst={args.roformer_inst_model})"
+                )
+            else:
+                backend_label = f"BS-RoFormer ({args.roformer_model})"
+        else:
+            backend_label = f"Demucs ({args.demucs_model})"
+        print(f"{backend_label} 人声分离...")
         instrumental, vocals = _separate_vocal_stems(
             audio_wav,
             work,
+            separator_backend=args.separator_backend,
             demucs_model=args.demucs_model,
             demucs_shifts=max(1, args.demucs_shifts),
+            **roformer_kwargs,
         )
 
         vocals_out = out_dir / f"{stem}_vocals.wav"

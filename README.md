@@ -1,6 +1,6 @@
 # video2text（Whisper 视频语音识别与字幕）
 
-基于 [OpenAI Whisper](https://github.com/openai/whisper) 的视频转文字工具：自动识别视频语言、将音频转成文字，并把字幕烧录到画面下方。可选 **AI 配音**（edge-tts / RVC / GPT-SoVITS），默认 **保留背景音乐**（Demucs 人声分离）。
+基于 [OpenAI Whisper](https://github.com/openai/whisper) 的视频转文字工具：自动识别视频语言、将音频转成文字，并把字幕烧录到画面下方。可选 **AI 配音**（edge-tts / RVC / GPT-SoVITS），默认 **保留背景音乐**（BS-RoFormer ensemble 人声分离，可回退 Demucs）。
 
 **同时支持 Linux 与 Windows**（Python + Whisper + edge-tts + ffmpeg）。
 
@@ -18,7 +18,10 @@ src/
     translate.py       # 字幕翻译
     ocr.py             # 画面烧录字幕 OCR
     whisper_transcribe.py  # Whisper 转写
-    separate.py        # Demucs 人声分离
+    separate.py        # 人声/背景分离调度 (Demucs / BS-RoFormer)
+    bs_roformer_split.py  # BS-RoFormer / Mel-Band (audio-separator)
+    vocal_bleed.py     # no_vocals 泄漏回收 (可选后处理)
+    sepformer_split.py # SepFormer 双路人声 (实验)
     f0_analysis.py     # 基频 (F0) 分析
     gender_split.py    # 自动男/女声切分
     dub.py             # AI 配音 (edge / RVC / GPT-SoVITS)
@@ -29,12 +32,20 @@ src/
   cli/                 # 单一功能命令行入口
     extract_subs.py    # 提取字幕 (Whisper / OCR)
     burn_subs.py       # 烧录字幕到视频
-    separate_audio.py  # 人声/伴奏分离
+    separate_audio.py  # 人声/伴奏分离 (默认 BS-RoFormer ensemble)
     audio_to_subs.py   # 音频 → 字幕 (Whisper)
     subs_to_audio.py   # 字幕 → AI 配音
     mix_audio.py       # 混合配音与伴奏
     speaker_map.py     # 生成 speaker_map.json
     transcribe.py      # 完整流水线 (同 transcribe_video.py)
+
+requirements.txt              # 核心依赖 (Whisper, Demucs, edge-tts 等)
+requirements-bs-roformer.txt  # BS-RoFormer / audio-separator (默认分离后端)
+requirements-diarize.txt      # pyannote 日记化
+requirements-sepformer.txt    # SepFormer 实验
+scripts/
+  setup_bs_roformer_env.sh    # 创建 video2text-roformer conda 环境
+  compare_roformer_ab.py      # no_vocals 客观 A/B (RMS / nv/v)
 ```
 
 根目录保留兼容入口：`transcribe_video.py`、`generate_speaker_map.py`（薄包装，转发到 `src/video2text`）。
@@ -47,10 +58,11 @@ src/
 # 1. Whisper 提取字幕
 python src/cli/audio_to_subs.py video.mp4 --language ja --out-dir ./out
 
-# 2. 人声分离 (二轨)
+# 2. 人声分离 (二轨, 默认 ensemble 保伴奏)
 python src/cli/separate_audio.py video.mp4 --out-dir ./out
+# 输出: video_no_vocals.wav (背景) + video_vocals.wav (人声)
 
-# 2b. 三轨自动分离 (背景 + 男声 + 女声, 无需人工 speaker_map)
+# 2b. 三轨 (背景 + 男声 + 女声)
 python src/cli/separate_audio.py video.mp4 --out-dir ./out --three-stems --split-mode whisper_f0 --language ja
 # 纯音频日记化 (需 pip install -r requirements-diarize.txt 与 HF_TOKEN)
 python src/cli/separate_audio.py video.mp4 --out-dir ./out --three-stems --split-mode diarize --max-speakers 4
@@ -74,18 +86,99 @@ python transcribe_video.py video.mp4 --dub --dub-lang zh
 
 ---
 
+## 人声/背景分离 (`separate_audio.py`)
+
+### 默认行为（无需额外参数）
+
+```bash
+conda activate video2text-roformer   # 或已安装 audio-separator 的环境
+python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out
+```
+
+| 默认项 | 值 | 说明 |
+|--------|-----|------|
+| `--separator-backend` | `bs_roformer` | 使用 [audio-separator](https://github.com/nomadkaraoke/python-audio-separator) |
+| `--roformer-mode` | `ensemble` | 多模型融合推理 |
+| `--roformer-ensemble-preset` | `instrumental_full` | 专保伴奏 (v1e+ + becruily inst) |
+
+输出：
+
+| 文件 | 说明 |
+|------|------|
+| `*_no_vocals.wav` | 背景/伴奏 (立体声) |
+| `*_vocals.wav` | 人声 |
+
+回退 Demucs：
+
+```bash
+python src/cli/separate_audio.py video.mp4 --out-dir ./out --separator-backend demucs
+```
+
+### RoFormer 分离模式 (`--roformer-mode`)
+
+| 模式 | 说明 | 典型场景 |
+|------|------|---------|
+| `ensemble` (**默认**) | audio-separator 内置 preset，多 ckpt 融合 | **保伴奏 + 去人声**，实践效果最佳 |
+| `single` | 单个 ckpt | A/B 对比、指定模型 |
+| `dual` | vocals 与 instrumental 各用专精 ckpt 分别推理 | 精细调参；注意 inst 模型名勿误匹配 stem |
+
+**常用 ensemble preset：**
+
+| preset | 说明 |
+|--------|------|
+| `instrumental_full` (**默认**) | 最大保伴奏 (v1e+ + becruily) |
+| `instrumental_clean` | 最少人声泄漏 (fv7z bleedless + resurrection) |
+| `instrumental_balanced` | 噪声与饱满度折中 |
+| `vocal_full` | 气声/情感句 capture 更强 |
+
+```bash
+# 换 preset
+python src/cli/separate_audio.py video.mp4 --out-dir ./out \
+  --roformer-ensemble-preset instrumental_clean
+
+# single 单模型
+python src/cli/separate_audio.py video.mp4 --out-dir ./out \
+  --roformer-mode single --roformer-model model_bs_roformer_ep_317_sdr_12.9755.ckpt
+
+# dual 双模型
+python src/cli/separate_audio.py video.mp4 --out-dir ./out \
+  --roformer-mode dual \
+  --roformer-vocals-model bs_roformer_vocals_revive_v3e_unwa.ckpt \
+  --roformer-inst-model bs_roformer_instrumental_resurrection_unwa.ckpt
+
+# 提高推理 overlap (更慢, 略增质量)
+python src/cli/separate_audio.py video.mp4 --out-dir ./out --roformer-overlap 16
+```
+
+**客观 A/B 对比**（#22 纯 BGM / #26「好温暖」窗口 RMS）：
+
+```bash
+python scripts/compare_roformer_ab.py ./out_a ./out_b --json-out ab_compare.json
+```
+
+### BS-RoFormer 环境
+
+```bash
+bash scripts/setup_bs_roformer_env.sh video2text-roformer
+conda activate video2text-roformer
+# 或: pip install -r requirements-bs-roformer.txt
+```
+
+---
+
 ## 三轨自动分离 (背景 / 男声 / 女声)
 
-默认 `separate_audio.py` 仅做 Demucs **二轨**分离 (`*_no_vocals.wav` + `*_vocals.wav`)。加 `--three-stems` 可自动输出三轨，**无需人工编辑 speaker_map**：
+加 `--three-stems` 在二轨基础上自动切分男/女声，**无需人工编辑 speaker_map**：
 
 | 输出文件 | 说明 |
 |---------|------|
-| `*_no_vocals.wav` | 背景音 (Demucs) |
+| `*_no_vocals.wav` | 背景音 (默认 BS-RoFormer ensemble) |
+| `*_vocals.wav` | 混合人声 |
 | `*_male_vocals.wav` | 男声片段叠加 |
 | `*_female_vocals.wav` | 女声片段叠加 |
-| `*_split_report.json` | 每段 F0、性别、置信度 (自动质检, 非手工 map) |
+| `*_split_report.json` | 每段 F0、性别、置信度、对齐信息 |
 
-**原理：** Demucs 深度学习分离背景与人声；男女声按**时间段切分**到不同轨道 (不是 FFT 滤波, 也不能在两人**同时重叠**说话时物理分离)。
+**原理：** 上游 RoFormer/Demucs 分离背景与人声；男女声按**时间段切分**到不同轨道 (不是 FFT 滤波, 也不能在两人**同时重叠**说话时物理分离)。
 
 **模式选型：**
 
@@ -97,25 +190,48 @@ python transcribe_video.py video.mp4 --dub --dub-lang zh
 
 | `--gender-backend` | 说明 |
 |--------------------|------|
-| `slice` (默认) | 按 SRT 时间段从 Demucs 人声轨切到男/女轨 |
-| `sepformer` (实验) | SpeechBrain SepFormer 双路分离后再组装；重叠串音场景可 A/B |
+| `slice` (默认) | 按时间轴从 vocals 轨切到男/女轨 |
+| `sepformer` (实验) | SpeechBrain SepFormer 双路分离后再组装 |
+
+**三轨推荐命令（少后期处理，默认上游 ensemble）：**
 
 ```bash
-# 推荐: OCR/SRT 全片时间轴 + 自适应 F0 + 更强 Demucs
+# 无 SRT：Whisper 自动时间轴 + F0，关闭 bleed/窗内回收
+python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_3stem \
+  --three-stems --split-mode whisper_f0 --language ja \
+  --no-recover-vocal-bleed --no-recover-window-vocals
+
+# 有 SRT：精度更高
+python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_3stem \
+  --three-stems --split-mode srt_f0 \
+  --srt 桔梗犬夜叉片段_whisper/桔梗犬夜叉片段.srt \
+  --no-recover-vocal-bleed
+
+# pyannote 日记化 (需 HF_TOKEN)
+export HF_TOKEN=hf_xxxx
+python src/cli/separate_audio.py video.mp4 --out-dir ./out \
+  --three-stems --split-mode diarize --max-speakers 2 \
+  --no-recover-vocal-bleed --no-recover-window-vocals
+```
+
+**Demucs + SRT 精细对齐（含 bleed 后处理，适合 Demucs 上游）：**
 python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_v2 \
+  --separator-backend demucs \
   --three-stems --split-mode srt_f0 \
   --srt 桔梗犬夜叉片段_whisper/桔梗犬夜叉片段.srt \
   --demucs-model htdemucs_ft --demucs-shifts 2
 
 # 短喊名/短句 (如「桔梗」「犬夜叉」): 边界 padding + onset 对齐 + 段间空隙回填
 python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_v3 \
+  --separator-backend demucs \
   --three-stems --split-mode srt_f0 \
   --srt 桔梗犬夜叉片段_whisper/桔梗犬夜叉片段.srt \
   --demucs-model htdemucs_ft --demucs-shifts 2 \
   --slice-pad-ms 120 --align-short-segments --fill-gap-ms 400
 
-# out_v4: 分类对齐 (shout/phrase) + 长窗多岛 + 窗内人声回收
+# out_v4: 分类对齐 + bleed 回收 (Demucs 上游)
 python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_v4 \
+  --separator-backend demucs \
   --three-stems --split-mode srt_f0 \
   --srt 桔梗犬夜叉片段_whisper/桔梗犬夜叉片段.srt \
   --demucs-model htdemucs_ft --demucs-shifts 2 \
@@ -125,20 +241,9 @@ python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_v4 \
   --recover-vocal-bleed \
   --speaker-map 桔梗犬夜叉片段_whisper/speaker_map.json
 
-# 轻量: Whisper + F0 (无 SRT 时)
-python src/cli/separate_audio.py input.mp4 --out-dir ./out \
-  --three-stems --split-mode whisper_f0 --language ja --whisper-model base
-
 # SepFormer 实验 (需 pip install -r requirements-sepformer.txt)
 python src/cli/separate_audio.py input.mp4 --out-dir ./out_sepformer \
   --three-stems --split-mode srt_f0 --srt ./subs.srt --gender-backend sepformer
-
-# 纯音频: pyannote 日记化 (需额外依赖与 HF Token)
-pip install -r requirements-diarize.txt
-# 在 HuggingFace 接受 pyannote/speaker-diarization-3.1 协议后:
-export HF_TOKEN=hf_xxxx   # Windows: set HF_TOKEN=hf_xxxx
-python src/cli/separate_audio.py input.mp4 --out-dir ./out \
-  --three-stems --split-mode diarize --min-speakers 1 --max-speakers 4
 ```
 
 **准确率边界：**
@@ -147,9 +252,23 @@ python src/cli/separate_audio.py input.mp4 --out-dir ./out \
 - 多人同性别会合并到同一轨；pyannote 可能 over/under-segment。
 - 重叠语音仍会串音；可试 `--gender-backend sepformer` 做 A/B（WSJ0 英文模型，日语动漫效果需实测）。
 
-**调参：** `--f0-threshold 200` (Hz, 默认 200 + 自适应)、`--min-voiced-ratio 0.25`、`--demucs-model htdemucs_ft`、`--demucs-shifts 2`。
+**调参：** `--f0-threshold 200`、`--min-voiced-ratio 0.25`；Demucs 回退时 `--demucs-model htdemucs_ft --demucs-shifts 2`。
 
-**短音 / 喊名切分 (「ki」落在边界外、段间两轨皆空):**
+**分离与 RoFormer 参数：**
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--separator-backend` | bs_roformer | `demucs` 作回退 |
+| `--roformer-mode` | ensemble | `single` / `dual` / `ensemble` |
+| `--roformer-ensemble-preset` | instrumental_full | ensemble 专保伴奏 |
+| `--roformer-model` | ep_317 ckpt | single 模式 |
+| `--roformer-vocals-model` | revive v3e | dual 模式人声 ckpt |
+| `--roformer-inst-model` | fv7z bleedless | dual 模式伴奏 ckpt |
+| `--roformer-overlap` | 模型 yaml | 提高如 `16` 增质量 |
+| `--demucs-model` | htdemucs_ft | 仅 demucs 后端 |
+| `--demucs-shifts` | 1 | >=2 更准更慢 |
+
+**SRT 三轨对齐 / bleed 后处理（Demucs 或 RoFormer 均可，RoFormer 建议关闭 bleed）：**
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
@@ -162,12 +281,19 @@ python src/cli/separate_audio.py input.mp4 --out-dir ./out \
 | `--shout-all-islands` | 长窗>5s 自动 | 强制 OCR 长窗内所有语声岛归入该段 |
 | `--recover-window-vocals` / `--no-recover-window-vocals` | srt_f0 时开启 | SRT 窗内未分配人声回收 |
 | `--recover-vocal-bleed` / `--no-recover-vocal-bleed` | srt_f0 时开启 | 从 `no_vocals` 回收 Demucs 泄漏 (如 ki/好温暖), 并清理背景轨 |
+| `--bleed-leak-ratio` | 0.70 | 样本 excess 判定: `\|nv\| - \|v\| * ratio` |
+| `--bleed-island-threshold` | 0.12 | fallback VAD 能量比 (优先用 `speech_islands`) |
+| `--bleed-min-nv-voc-ratio` | 1.5 | 段级泄漏判定 RMS 比下限 |
+| `--bleed-min-excess-ratio` | 0.15 | 单样本最小转移比例 |
+| `--bleed-bgm-attenuate` | 0.85 | 从 no_vocals 减去的增益 (越小越保守) |
+| `--bleed-fade-ms` | 8 | 语声岛边界 crossfade 毫秒 |
 | `--speaker-map` | 无 | 用已有 map 覆盖 gender 后重切 |
 
-**Report 新字段** (`*_split_report.json`):
+**Report 字段** (`*_split_report.json`)：
 
-- 每段: `aligned_start/end`, `srt_start/end`, `align_cue_type`, `speech_islands`, `recovered_sec`, `bleed_recovered_sec`
-- 汇总: `stats.stem_assigned_sec`, `stats.unassigned_vocal_sec` (目标较 out_v3 明显下降)
+- `separator`: 上游后端、mode、preset/模型名
+- 每段: `aligned_start/end`, `srt_start/end`, `align_cue_type`, `speech_islands`, `bleed_recovered_sec`
+- 汇总: `stats.stem_assigned_sec`, `stats.unassigned_vocal_sec`
 
 ---
 
@@ -201,6 +327,10 @@ ffmpeg -version
 cd /path/to/ai_model/model/video2text
 conda activate py312          # 若使用 conda
 pip install -r requirements.txt
+
+# 人声分离 (BS-RoFormer ensemble 默认后端, 推荐独立环境)
+pip install -r requirements-bs-roformer.txt
+# 或: bash scripts/setup_bs_roformer_env.sh video2text-roformer
 
 # 有 NVIDIA GPU 时, 建议安装对应 CUDA 的 PyTorch
 # 参见 https://pytorch.org/get-started/locally/
@@ -398,7 +528,8 @@ python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --
 | `*_subtitled.mp4`（或原后缀） | 底部烧录字幕后的视频 |
 | `*_dub.wav` | AI 配音音轨（启用 `--dub` 时） |
 | `*_mixed.wav` | 配音 + 背景音乐混合轨（默认保留 BGM 时） |
-| `*_vocals.wav` | Demucs 分离的人声轨 |
+| `*_vocals.wav` | 分离的人声轨 (默认 BS-RoFormer) |
+| `*_no_vocals.wav` | 分离的背景/伴奏轨 |
 | `*_voice_ref.wav` | 自动截取的音色参考片段 |
 | `*_subtitled_dubbed.mp4` | 烧录字幕 + AI 配音 |
 | `*_dubbed.mp4` | 仅替换配音（配合 `--no-burn --dub` 时） |
@@ -453,7 +584,7 @@ python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --
 | `rvc` | 中高 | `--rvc-model` 或 `--rvc-api`；可选 `pip install -r requirements-rvc.txt` |
 | `gpt-sovits` | 高 | 本地启动 GPT-SoVITS API；自动截取 `--voice-ref` |
 
-- 默认 **保留背景音乐**（Demucs 分离人声）；用 `--no-keep-bgm` 关闭。
+- 默认 **保留背景音乐**（BS-RoFormer ensemble 分离人声）；用 `--no-keep-bgm` 关闭；回退 `--separator-backend demucs`。
 - 硬字幕视频（无独立字幕轨）请用 `--subs-source ocr --ocr-lang zh`。
 - 已有中文字幕时用 `--dub-only --dub-srt xxx_zh.srt --dub-lang zh`，勿走音频转写+翻译。
 - **多角色男女声**：先 `python generate_speaker_map.py --whisper-dir <输出目录>` 自动生成 `speaker_map.json`，再 `--dub-speaker-map`、`--dub-voice-female`、`--dub-voice-male`（仅 `edge`/`rvc`）。
@@ -466,7 +597,7 @@ python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --
 1. 字幕来源：Whisper 音频转写 **或** OCR 画面字幕 **或** 已有 SRT  
 2. 可选：自动翻译字幕（`--translate-to`）  
 3. **（可选 `--dub`）** 按引擎合成配音：`edge-tts` / `RVC` / `GPT-SoVITS`  
-4. Demucs 分离人声与 BGM；默认将 AI 配音与 BGM 混合  
+4. BS-RoFormer ensemble（或 Demucs）分离人声与 BGM；默认将 AI 配音与 BGM 混合  
 5. 用 ffmpeg 输出最终视频：可选烧录字幕 + 替换音轨  
 
-首次运行会下载 Whisper / Demucs 权重到本机缓存。
+首次运行会下载 Whisper / RoFormer / Demucs 权重到本机缓存。

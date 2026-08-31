@@ -531,6 +531,13 @@ def split_vocals_by_gender(
     speaker_map_path: Path | None = None,
     no_vocals_path: Path | None = None,
     recover_vocal_bleed: bool | None = None,
+    bleed_leak_ratio: float = 0.70,
+    bleed_island_threshold: float = 0.12,
+    bleed_min_nv_voc_ratio: float = 1.5,
+    bleed_min_excess_ratio: float = 0.15,
+    bleed_bgm_attenuate: float = 0.85,
+    bleed_fade_ms: float = 8.0,
+    separator_meta: dict | None = None,
 ) -> list[dict]:
     """自动标注性别并输出男/女两轨 + JSON 报告。"""
     meta: dict = {
@@ -540,6 +547,8 @@ def split_vocals_by_gender(
         "f0_threshold": f0_threshold,
         "adaptive_threshold": adaptive_threshold,
     }
+    if separator_meta:
+        meta["separator"] = separator_meta
     vocals_duration = get_media_duration(vocals_path)
     gender_meta: dict = {}
 
@@ -746,8 +755,22 @@ def split_vocals_by_gender(
             out_female,
             sr=sr,
             window_pad_sec=slice_pad_ms / 1000.0,
+            leak_ratio=bleed_leak_ratio,
+            island_threshold_ratio=bleed_island_threshold,
+            min_nv_voc_ratio=bleed_min_nv_voc_ratio,
+            min_excess_ratio=bleed_min_excess_ratio,
+            bgm_attenuate=bleed_bgm_attenuate,
+            fade_ms=bleed_fade_ms,
         )
-        meta["vocal_bleed"] = bleed_stats
+        meta["vocal_bleed"] = {
+            **bleed_stats,
+            "leak_ratio": bleed_leak_ratio,
+            "island_threshold_ratio": bleed_island_threshold,
+            "min_nv_voc_ratio": bleed_min_nv_voc_ratio,
+            "min_excess_ratio": bleed_min_excess_ratio,
+            "bgm_attenuate": bleed_bgm_attenuate,
+            "fade_ms": bleed_fade_ms,
+        }
         meta["no_vocals"] = str(no_vocals_path.resolve())
         for entry in report:
             key = str(entry.get("index", ""))

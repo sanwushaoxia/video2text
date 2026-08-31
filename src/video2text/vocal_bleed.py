@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from video2text.f0_analysis import load_vocals_mono
+from video2text.f0_analysis import load_vocals_mono, load_vocals_stereo
 from video2text.segment_align import detect_speech_islands
 
 
@@ -27,6 +27,15 @@ def _iter_segment_windows(
     return max(0.0, start), end
 
 
+def _parse_stored_islands(seg: dict) -> list[tuple[float, float]]:
+    stored = seg.get("speech_islands") or []
+    parsed: list[tuple[float, float]] = []
+    for item in stored:
+        if isinstance(item, dict):
+            parsed.append((float(item["start"]), float(item["end"])))
+    return parsed
+
+
 def _leak_islands_for_segment(
     no_vocals,
     sr: int,
@@ -37,7 +46,12 @@ def _leak_islands_for_segment(
     pad_sec: float,
     threshold_ratio: float,
 ) -> list[tuple[float, float]]:
-    islands = detect_speech_islands(
+    """优先 vocals 对齐的 speech_islands; 无岛时才在 no_vocals 上 fallback VAD。"""
+    parsed = _parse_stored_islands(seg)
+    if parsed:
+        return parsed
+
+    return detect_speech_islands(
         no_vocals,
         sr,
         win_start,
@@ -46,15 +60,29 @@ def _leak_islands_for_segment(
         pad_end_sec=pad_sec,
         threshold_ratio=threshold_ratio,
     )
-    if islands:
-        return islands
 
-    stored = seg.get("speech_islands") or []
-    parsed: list[tuple[float, float]] = []
-    for item in stored:
-        if isinstance(item, dict):
-            parsed.append((float(item["start"]), float(item["end"])))
-    return parsed
+
+def _window_nv_voc_ratio(
+    vocals,
+    no_vocals,
+    sr: int,
+    win_start: float,
+    win_end: float,
+) -> float:
+    import numpy as np
+
+    g0 = max(0, int(win_start * sr))
+    g1 = min(len(vocals), len(no_vocals), int(win_end * sr))
+    if g1 <= g0:
+        return 0.0
+
+    v_rms = float(np.sqrt(np.mean(vocals[g0:g1] ** 2)))
+    nv_rms = float(np.sqrt(np.mean(no_vocals[g0:g1] ** 2)))
+    if nv_rms < 1e-7:
+        return 0.0
+    if v_rms < 1e-7:
+        return float("inf") if nv_rms > 1e-4 else 0.0
+    return nv_rms / v_rms
 
 
 def _segment_needs_bleed_recovery(
@@ -64,27 +92,31 @@ def _segment_needs_bleed_recovery(
     sr: int,
     *,
     pad_sec: float,
-    min_nv_voc_ratio: float = 1.25,
+    min_nv_voc_ratio: float = 1.5,
 ) -> bool:
-    import numpy as np
-
-    cue = seg.get("align_cue_type")
-    if cue in ("shout", "phrase_long_window"):
-        return True
-
     win_start, win_end = _iter_segment_windows(seg, pad_sec=pad_sec)
-    g0 = max(0, int(win_start * sr))
-    g1 = min(len(vocals), int(win_end * sr))
-    if g1 <= g0:
-        return False
+    ratio = _window_nv_voc_ratio(vocals, no_vocals, sr, win_start, win_end)
+    if ratio == float("inf"):
+        return True
+    return ratio >= min_nv_voc_ratio
 
-    v_rms = float(np.sqrt(np.mean(vocals[g0:g1] ** 2)))
-    nv_rms = float(np.sqrt(np.mean(no_vocals[g0:g1] ** 2)))
-    if nv_rms < 1e-7:
-        return False
-    if v_rms < 1e-7:
-        return nv_rms > 1e-4
-    return nv_rms / v_rms >= min_nv_voc_ratio
+
+def _fade_weight(
+    sample_idx: int,
+    g0: int,
+    g1: int,
+    fade_samples: int,
+) -> float:
+    if g1 <= g0 or fade_samples <= 0:
+        return 1.0
+    length = g1 - g0
+    pos = sample_idx - g0
+    if pos < fade_samples:
+        return pos / fade_samples
+    tail = length - 1 - pos
+    if tail < fade_samples:
+        return max(0.0, tail / fade_samples)
+    return 1.0
 
 
 def apply_vocal_bleed_recovery(
@@ -96,10 +128,13 @@ def apply_vocal_bleed_recovery(
     *,
     sr: int = 44100,
     window_pad_sec: float = 0.12,
-    leak_ratio: float = 0.55,
+    leak_ratio: float = 0.70,
     transfer_gain: float = 0.92,
-    bgm_attenuate: float = 0.95,
-    island_threshold_ratio: float = 0.06,
+    bgm_attenuate: float = 0.85,
+    island_threshold_ratio: float = 0.12,
+    min_nv_voc_ratio: float = 1.5,
+    min_excess_ratio: float = 0.15,
+    fade_ms: float = 8.0,
 ) -> dict:
     """
     在标注语声窗内, 将 Demucs 漏进 no_vocals 的人声转移到男/女轨, 并衰减背景轨。
@@ -108,15 +143,20 @@ def apply_vocal_bleed_recovery(
     import soundfile as sf
 
     vocals, _ = load_vocals_mono(vocals_path, sr=sr)
-    no_vocals, _ = load_vocals_mono(no_vocals_path, sr=sr)
+    no_vocals_l, no_vocals_r = load_vocals_stereo(no_vocals_path, sr=sr)
     male, _ = load_vocals_mono(male_path, sr=sr)
     female, _ = load_vocals_mono(female_path, sr=sr)
 
-    n = min(len(vocals), len(no_vocals), len(male), len(female))
+    n = min(len(vocals), len(no_vocals_l), len(no_vocals_r), len(male), len(female))
     vocals = np.asarray(vocals[:n], dtype=np.float32)
-    no_vocals = np.asarray(no_vocals[:n], dtype=np.float32)
+    no_vocals = np.asarray((no_vocals_l[:n] + no_vocals_r[:n]) * 0.5, dtype=np.float32)
+    no_vocals_orig = no_vocals.copy()
+    no_vocals_l = np.asarray(no_vocals_l[:n], dtype=np.float32)
+    no_vocals_r = np.asarray(no_vocals_r[:n], dtype=np.float32)
     male = np.asarray(male[:n], dtype=np.float32)
     female = np.asarray(female[:n], dtype=np.float32)
+
+    fade_samples = max(1, int(sr * fade_ms / 1000.0))
 
     owner = np.full(n, -1, dtype=np.int32)
     owner_gender: list[str | None] = [None] * n
@@ -133,7 +173,12 @@ def apply_vocal_bleed_recovery(
 
     for seg in segs:
         if not _segment_needs_bleed_recovery(
-            seg, vocals, no_vocals, sr, pad_sec=window_pad_sec
+            seg,
+            vocals,
+            no_vocals,
+            sr,
+            pad_sec=window_pad_sec,
+            min_nv_voc_ratio=min_nv_voc_ratio,
         ):
             continue
         win_start, win_end = _iter_segment_windows(seg, pad_sec=window_pad_sec)
@@ -148,10 +193,7 @@ def apply_vocal_bleed_recovery(
             threshold_ratio=island_threshold_ratio,
         )
         if not islands:
-            g0 = max(0, int(win_start * sr))
-            g1 = min(n, int(win_end * sr))
-            if g1 > g0:
-                islands = [(win_start, win_end)]
+            continue
 
         seg_transferred = 0
         for isl_start, isl_end in islands:
@@ -167,10 +209,16 @@ def apply_vocal_bleed_recovery(
                     continue
 
                 excess = abs(nv) - abs(v) * leak_ratio
-                if excess <= abs(nv) * 0.08:
+                if excess <= abs(nv) * min_excess_ratio:
                     continue
 
-                transfer = (1.0 if nv >= 0 else -1.0) * excess * transfer_gain
+                weight = _fade_weight(i, g0, g1, fade_samples)
+                if weight <= 0.0:
+                    continue
+
+                transfer = (
+                    (1.0 if nv >= 0 else -1.0) * excess * transfer_gain * weight
+                )
                 target = male if gender == "male" else female
                 if abs(transfer) >= abs(float(target[i])):
                     target[i] = transfer
@@ -191,18 +239,33 @@ def apply_vocal_bleed_recovery(
                 3,
             )
 
-    for track in (male, female, vocals, no_vocals):
+    gain = np.ones(n, dtype=np.float32)
+    mask = np.abs(no_vocals_orig) > 1e-7
+    gain[mask] = np.clip(no_vocals[mask] / no_vocals_orig[mask], 0.0, 1.0)
+    no_vocals_l *= gain
+    no_vocals_r *= gain
+
+    for track in (male, female, vocals):
         peak = float(np.max(np.abs(track)))
         if peak > 0.99:
             track /= peak
 
+    stereo_peak = float(
+        np.max(np.abs(np.stack([no_vocals_l, no_vocals_r], axis=0)))
+    )
+    if stereo_peak > 0.99:
+        scale = 0.99 / stereo_peak
+        no_vocals_l *= scale
+        no_vocals_r *= scale
+
     sf.write(str(male_path), male, sr)
     sf.write(str(female_path), female, sr)
     sf.write(str(vocals_path), vocals, sr)
-    sf.write(str(no_vocals_path), no_vocals, sr)
+    sf.write(str(no_vocals_path), np.stack([no_vocals_l, no_vocals_r], axis=1), sr)
 
     return {
         "bleed_recovered_sec": round(total_transferred / sr, 2),
         "bleed_recovered_by_index": bleed_recovered_sec,
         "no_vocals_cleaned": True,
+        "no_vocals_stereo": True,
     }

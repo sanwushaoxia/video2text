@@ -85,3 +85,14 @@ def load_vocals_mono(vocals_path, *, sr: int = 44100):
     import librosa
 
     return librosa.load(vocals_path, sr=sr, mono=True)
+
+
+def load_vocals_stereo(vocals_path, *, sr: int = 44100):
+    """加载立体声; 单声道输入时返回相同的两路。"""
+    import librosa
+    import numpy as np
+
+    y, file_sr = librosa.load(vocals_path, sr=sr, mono=False)
+    if y.ndim == 1:
+        return y.astype(np.float32), y.astype(np.float32)
+    return y[0].astype(np.float32), y[1].astype(np.float32)
