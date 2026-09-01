@@ -1,0 +1,8 @@
+# 多角色分离: speaker embedding + 重叠段盲分离 (可选)
+# 与 requirements-diarize.txt 配合使用 (--multi-stems / diarize_bss)
+#
+# 动漫说话人 embedding (默认 litagin ECAPA, 失败时回退 VoxCeleb)
+speechbrain>=1.0.0
+torchaudio>=2.0.0
+# MossFormer2 重叠分离 (可选, bss-backend=mossformer2|auto)
+# clearvoice  # 见 https://github.com/modelscope/clearervoice-studio

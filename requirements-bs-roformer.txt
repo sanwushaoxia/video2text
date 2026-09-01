@@ -1,4 +1,4 @@
-# BS-RoFormer vocal separation (separator-backend=bs_roformer 可选)
+# BS-RoFormer vocal separation (默认分离后端)
 # Python >= 3.10
 #
 # GPU (推荐):

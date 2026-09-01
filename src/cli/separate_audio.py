@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Demucs 人声/伴奏分离；可选三轨 (背景/男声/女声)。"""
+"""BS-RoFormer 人声/伴奏分离；可选三轨 (男/女) 或多轨 (N speaker)。"""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,18 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from video2text.ffmpeg_util import configure_ffmpeg, extract_stereo_audio
-from video2text.separate import _separate_vocal_stems, separate_three_stems
+from video2text.separate import _separate_vocal_stems, separate_multi_stems, separate_three_stems
+
+
+def _roformer_backend_label(args) -> str:
+    if args.roformer_mode == "ensemble":
+        return f"BS-RoFormer ensemble ({args.roformer_ensemble_preset})"
+    if args.roformer_mode == "dual":
+        return (
+            f"BS-RoFormer dual (voc={args.roformer_vocals_model}, "
+            f"inst={args.roformer_inst_model})"
+        )
+    return f"BS-RoFormer ({args.roformer_model})"
 
 
 def main(argv=None) -> int:
@@ -29,25 +40,24 @@ def main(argv=None) -> int:
     p.add_argument(
         "--three-stems",
         action="store_true",
-        help="输出三轨: 背景 + 男声 + 女声 (Demucs + 自动性别切分)",
+        help="输出三轨: 背景 + 男声 + 女声 (BS-RoFormer + 自动性别切分)",
+    )
+    p.add_argument(
+        "--multi-stems",
+        action="store_true",
+        help="输出 N 条 speaker 轨 (BS-RoFormer + pyannote 日记化)",
     )
     p.add_argument(
         "--split-mode",
-        choices=["whisper_f0", "srt_f0", "diarize"],
+        choices=["whisper_f0", "srt_f0", "diarize", "diarize_bss"],
         default="srt_f0",
-        help="三轨模式: srt_f0=SRT+F0+文本规则(推荐); whisper_f0; diarize",
+        help="三轨: srt_f0/whisper_f0/diarize; 多轨: diarize/diarize_bss",
     )
     p.add_argument(
         "--srt",
         type=Path,
         default=None,
         help="字幕 SRT (split-mode=srt_f0 必填; 默认同目录 <stem>.srt 或 *_whisper/*.srt)",
-    )
-    p.add_argument(
-        "--gender-backend",
-        choices=["slice", "sepformer"],
-        default="slice",
-        help="男女声组装: slice=按时间轴切 vocals; sepformer=SepFormer 双路(实验)",
     )
     p.add_argument(
         "--f0-threshold",
@@ -65,24 +75,6 @@ def main(argv=None) -> int:
         type=float,
         default=0.25,
         help="F0 可信度下限 (默认 0.25)",
-    )
-    p.add_argument(
-        "--demucs-model",
-        default="htdemucs_ft",
-        choices=["htdemucs", "htdemucs_ft", "mdx_extra_q"],
-        help="Demucs 模型 (默认 htdemucs_ft, 人声/背景更干净)",
-    )
-    p.add_argument(
-        "--demucs-shifts",
-        type=int,
-        default=1,
-        help="Demucs shifts 次数 (>=2 更慢但更准, 默认 1)",
-    )
-    p.add_argument(
-        "--separator-backend",
-        choices=["demucs", "bs_roformer"],
-        default="bs_roformer",
-        help="人声/背景分离后端 (默认 bs_roformer ensemble; 回退用 demucs)",
     )
     p.add_argument(
         "--roformer-model",
@@ -149,99 +141,31 @@ def main(argv=None) -> int:
         help="HuggingFace Token (diarize 模式; 或设环境变量 HF_TOKEN)",
     )
     p.add_argument(
-        "--slice-pad-ms",
-        type=int,
-        default=120,
-        help="切片起点 padding 毫秒 (默认 120, 避免 onset 落在 SRT 边界外)",
-    )
-    p.add_argument(
-        "--slice-pad-end-ms",
-        type=int,
-        default=None,
-        help="切片终点 padding 毫秒 (默认同 --slice-pad-ms)",
-    )
-    p.add_argument(
-        "--align-short-segments",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="短句 onset/VAD 边界收紧 (srt_f0 默认开启)",
-    )
-    p.add_argument(
-        "--fill-gap-ms",
-        type=int,
-        default=400,
-        help="段间空隙回填上限毫秒 (默认 400; 0 禁用)",
-    )
-    p.add_argument(
-        "--shout-min-ms",
-        type=int,
-        default=600,
-        help="喊名最短切片毫秒 (默认 600)",
-    )
-    p.add_argument(
-        "--shout-tail-pad-ms",
-        type=int,
-        default=250,
-        help="喊名尾音延长毫秒 (默认 250)",
-    )
-    p.add_argument(
-        "--shout-all-islands",
-        action="store_true",
-        help="喊名 OCR 长窗内所有语声岛都归入该段 (默认仅长窗>5s 自动启用)",
-    )
-    p.add_argument(
-        "--recover-window-vocals",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="SRT 窗内未分配人声回收 (srt_f0 默认开启)",
-    )
-    p.add_argument(
         "--speaker-map",
         type=Path,
         default=None,
-        help="可选 speaker_map.json, 按 index 覆盖 gender 后重切",
+        help="可选 speaker_map.json, 按 index 覆盖 gender 后重切 (仅 --three-stems)",
     )
     p.add_argument(
-        "--recover-vocal-bleed",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="从 no_vocals 回收 Demucs 泄漏语声并清理背景轨 (srt_f0 默认开启)",
+        "--diarization-model",
+        default="pyannote/speaker-diarization-community-1",
+        help="pyannote 日记化模型 (multi-stems / diarize 模式)",
     )
     p.add_argument(
-        "--bleed-leak-ratio",
-        type=float,
-        default=0.70,
-        help="泄漏回收: no_vocals 超出 vocals 的比例阈值 (默认 0.70)",
+        "--embedding-model",
+        default="litagin/anime_speaker_embedding_by_va_ecapa_tdnn_groupnorm",
+        help="说话人 embedding 模型 (diarize_bss 重叠归属)",
     )
     p.add_argument(
-        "--bleed-island-threshold",
-        type=float,
-        default=0.12,
-        help="泄漏回收 fallback VAD 能量比阈值 (默认 0.12)",
+        "--bss-backend",
+        choices=["auto", "mossformer2", "sepformer"],
+        default="auto",
+        help="重叠段盲分离 backend (diarize_bss)",
     )
     p.add_argument(
-        "--bleed-min-nv-voc-ratio",
-        type=float,
-        default=1.5,
-        help="段级泄漏判定: no_vocals/vocals RMS 比下限 (默认 1.5)",
-    )
-    p.add_argument(
-        "--bleed-min-excess-ratio",
-        type=float,
-        default=0.15,
-        help="样本转移: excess 占 no_vocals 幅度比下限 (默认 0.15)",
-    )
-    p.add_argument(
-        "--bleed-bgm-attenuate",
-        type=float,
-        default=0.85,
-        help="从 no_vocals 减去的泄漏增益 (默认 0.85, 越小越保守)",
-    )
-    p.add_argument(
-        "--bleed-fade-ms",
-        type=float,
-        default=8.0,
-        help="语声岛边界 crossfade 毫秒 (默认 8)",
+        "--no-embedding",
+        action="store_true",
+        help="diarize_bss 时禁用 anime embedding (仅用日记化 speaker_id)",
     )
     p.add_argument("--ffmpeg", default=None)
     p.add_argument("--ffprobe", default=None)
@@ -261,6 +185,24 @@ def main(argv=None) -> int:
     out_dir = args.out_dir.expanduser().resolve() if args.out_dir else src.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = args.stem or src.stem
+
+    if args.three_stems and args.multi_stems:
+        print("--three-stems 与 --multi-stems 不能同时使用", file=sys.stderr)
+        return 1
+
+    if args.multi_stems and args.split_mode not in ("diarize", "diarize_bss"):
+        print(
+            "--multi-stems 需要 --split-mode diarize 或 diarize_bss",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.three_stems and args.split_mode == "diarize_bss":
+        print(
+            "--three-stems 不支持 diarize_bss, 请使用 --multi-stems",
+            file=sys.stderr,
+        )
+        return 1
 
     srt_path = None
     if args.srt:
@@ -301,6 +243,33 @@ def main(argv=None) -> int:
             print(f"提取音轨: {src.name}")
             extract_stereo_audio(src, audio_wav)
 
+        if args.multi_stems:
+            try:
+                separate_multi_stems(
+                    audio_wav,
+                    out_dir,
+                    stem,
+                    work,
+                    split_mode=args.split_mode,
+                    min_speakers=args.min_speakers,
+                    max_speakers=args.max_speakers,
+                    hf_token=args.hf_token,
+                    diarization_model=args.diarization_model,
+                    embedding_model=args.embedding_model,
+                    use_embedding=not args.no_embedding,
+                    bss_backend=args.bss_backend,
+                    roformer_model=args.roformer_model,
+                    roformer_mode=args.roformer_mode,
+                    roformer_ensemble_preset=args.roformer_ensemble_preset,
+                    roformer_vocals_model=args.roformer_vocals_model,
+                    roformer_inst_model=args.roformer_inst_model,
+                    roformer_overlap=args.roformer_overlap,
+                )
+            except (RuntimeError, ValueError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            return 0
+
         if args.three_stems:
             try:
                 separate_three_stems(
@@ -309,7 +278,6 @@ def main(argv=None) -> int:
                     stem,
                     work,
                     split_mode=args.split_mode,
-                    gender_backend=args.gender_backend,
                     srt_path=srt_path,
                     f0_threshold=args.f0_threshold,
                     adaptive_threshold=not args.no_adaptive_f0,
@@ -320,64 +288,25 @@ def main(argv=None) -> int:
                     min_speakers=args.min_speakers,
                     max_speakers=args.max_speakers,
                     hf_token=args.hf_token,
-                    separator_backend=args.separator_backend,
-                    demucs_model=args.demucs_model,
-                    demucs_shifts=max(1, args.demucs_shifts),
                     roformer_model=args.roformer_model,
                     roformer_mode=args.roformer_mode,
                     roformer_ensemble_preset=args.roformer_ensemble_preset,
                     roformer_vocals_model=args.roformer_vocals_model,
                     roformer_inst_model=args.roformer_inst_model,
                     roformer_overlap=args.roformer_overlap,
-                    slice_pad_ms=max(0, args.slice_pad_ms),
-                    slice_pad_end_ms=args.slice_pad_end_ms,
-                    align_short_segments=args.align_short_segments,
-                    fill_gap_ms=max(0, args.fill_gap_ms),
-                    shout_min_ms=max(0, args.shout_min_ms),
-                    shout_tail_pad_ms=max(0, args.shout_tail_pad_ms),
-                    shout_all_islands=args.shout_all_islands,
-                    recover_window_vocals=args.recover_window_vocals,
                     speaker_map_path=(
                         args.speaker_map.expanduser().resolve()
                         if args.speaker_map
                         else None
                     ),
-                    recover_vocal_bleed=args.recover_vocal_bleed,
-                    bleed_leak_ratio=args.bleed_leak_ratio,
-                    bleed_island_threshold=args.bleed_island_threshold,
-                    bleed_min_nv_voc_ratio=args.bleed_min_nv_voc_ratio,
-                    bleed_min_excess_ratio=args.bleed_min_excess_ratio,
-                    bleed_bgm_attenuate=args.bleed_bgm_attenuate,
-                    bleed_fade_ms=args.bleed_fade_ms,
                 )
             except (RuntimeError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
             return 0
 
-        if args.separator_backend == "bs_roformer":
-            if args.roformer_mode == "ensemble":
-                backend_label = (
-                    f"BS-RoFormer ensemble ({args.roformer_ensemble_preset})"
-                )
-            elif args.roformer_mode == "dual":
-                backend_label = (
-                    f"BS-RoFormer dual (voc={args.roformer_vocals_model}, "
-                    f"inst={args.roformer_inst_model})"
-                )
-            else:
-                backend_label = f"BS-RoFormer ({args.roformer_model})"
-        else:
-            backend_label = f"Demucs ({args.demucs_model})"
-        print(f"{backend_label} 人声分离...")
-        instrumental, vocals = _separate_vocal_stems(
-            audio_wav,
-            work,
-            separator_backend=args.separator_backend,
-            demucs_model=args.demucs_model,
-            demucs_shifts=max(1, args.demucs_shifts),
-            **roformer_kwargs,
-        )
+        print(f"{_roformer_backend_label(args)} 人声分离...")
+        instrumental, vocals = _separate_vocal_stems(audio_wav, work, **roformer_kwargs)
 
         vocals_out = out_dir / f"{stem}_vocals.wav"
         bgm_out = out_dir / f"{stem}_no_vocals.wav"

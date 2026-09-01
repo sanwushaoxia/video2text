@@ -1,6 +1,0 @@
-# SepFormer 双说话人分离 (gender-backend=sepformer 可选)
-# pip install -r requirements-sepformer.txt
-# 交替对白优先用 split-mode=srt_f0 + gender-backend=slice
-speechbrain>=1.0.0
-torch
-torchaudio

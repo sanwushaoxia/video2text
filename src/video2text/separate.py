@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from video2text.ffmpeg_util import extract_stereo_audio
 from video2text.gender_split import split_vocals_by_gender
 from video2text.media import _extract_audio_clip, get_media_duration
+from video2text.speaker_stems import split_vocals_by_speaker
 from video2text.srt import _is_meaningful_subtitle, parse_srt
+from video2text.diarization import DEFAULT_DIARIZATION_MODEL
+from video2text.speaker_embedding import DEFAULT_ANIME_EMBEDDING_MODEL
 from video2text.bs_roformer_split import (
     DEFAULT_ROFORMER_ENSEMBLE_PRESET,
     DEFAULT_ROFORMER_INST_MODEL,
@@ -25,6 +26,14 @@ class VocalAssets:
     vocals: Path | None = None
     voice_ref: Path | None = None
     voice_ref_text: str | None = None
+
+
+@dataclass
+class MultiStemResult:
+    instrumental: Path
+    vocals: Path
+    speaker_paths: dict[str, Path]
+    report: Path
 
 
 @dataclass
@@ -107,57 +116,6 @@ def extract_voice_reference(
     )
     return out_path, ref_text
 
-def _separate_vocal_stems_demucs(
-    audio_wav: Path,
-    work_dir: Path,
-    *,
-    demucs_model: str = "htdemucs",
-    demucs_shifts: int = 1,
-) -> tuple[Path, Path]:
-    """Demucs 双轨分离: 返回 (no_vocals, vocals)。"""
-    import torch
-
-    demucs_out = work_dir / "demucs"
-    demucs_out.mkdir(parents=True, exist_ok=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(
-        f"分离人声与背景音乐 (Demucs {demucs_model}, shifts={demucs_shifts}, "
-        f"device={device}, 首次运行会下载模型)..."
-    )
-    cmd = [
-        sys.executable,
-        "-m",
-        "demucs.separate",
-        "--two-stems",
-        "vocals",
-        "-n",
-        demucs_model,
-        "-d",
-        device,
-        "-o",
-        str(demucs_out),
-    ]
-    if demucs_shifts > 1:
-        cmd.extend(["--shifts", str(demucs_shifts)])
-    cmd.append(str(audio_wav))
-    proc = subprocess.run(cmd, capture_output=True, check=False)
-    if proc.returncode != 0:
-        stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
-        raise RuntimeError(f"人声分离失败 (demucs):\n{stderr[-2000:]}")
-
-    stem_dir = demucs_out / demucs_model / audio_wav.stem
-    instrumental = stem_dir / "no_vocals.wav"
-    vocals = stem_dir / "vocals.wav"
-    if not instrumental.is_file() or not vocals.is_file():
-        inst_found = list((demucs_out / demucs_model).rglob("no_vocals.wav"))
-        voc_found = list((demucs_out / demucs_model).rglob("vocals.wav"))
-        if not inst_found or not voc_found:
-            raise RuntimeError("未找到 demucs 输出的人声/伴奏轨")
-        instrumental = inst_found[0]
-        vocals = voc_found[0]
-    return instrumental, vocals
-
-
 def _build_roformer_meta(
     *,
     roformer_model: str,
@@ -187,9 +145,6 @@ def _separate_vocal_stems(
     audio_wav: Path,
     work_dir: Path,
     *,
-    separator_backend: str = "bs_roformer",
-    demucs_model: str = "htdemucs",
-    demucs_shifts: int = 1,
     roformer_model: str = DEFAULT_ROFORMER_MODEL,
     roformer_mode: str = DEFAULT_ROFORMER_MODE,
     roformer_ensemble_preset: str | None = DEFAULT_ROFORMER_ENSEMBLE_PRESET,
@@ -197,25 +152,16 @@ def _separate_vocal_stems(
     roformer_inst_model: str | None = None,
     roformer_overlap: int | None = None,
 ) -> tuple[Path, Path]:
-    """双轨分离 dispatcher: 返回 (no_vocals/instrumental, vocals)。"""
-    if separator_backend == "bs_roformer":
-        return separate_vocals_bs_roformer(
-            audio_wav,
-            work_dir,
-            model_filename=roformer_model,
-            roformer_mode=roformer_mode,
-            ensemble_preset=roformer_ensemble_preset,
-            vocals_model=roformer_vocals_model,
-            inst_model=roformer_inst_model,
-            overlap=roformer_overlap,
-        )
-    if separator_backend != "demucs":
-        raise ValueError(f"未知 separator_backend: {separator_backend}")
-    return _separate_vocal_stems_demucs(
+    """BS-RoFormer 双轨分离: 返回 (no_vocals/instrumental, vocals)。"""
+    return separate_vocals_bs_roformer(
         audio_wav,
         work_dir,
-        demucs_model=demucs_model,
-        demucs_shifts=demucs_shifts,
+        model_filename=roformer_model,
+        roformer_mode=roformer_mode,
+        ensemble_preset=roformer_ensemble_preset,
+        vocals_model=roformer_vocals_model,
+        inst_model=roformer_inst_model,
+        overlap=roformer_overlap,
     )
 
 
@@ -226,7 +172,6 @@ def separate_three_stems(
     work_dir: Path,
     *,
     split_mode: str = "whisper_f0",
-    gender_backend: str = "slice",
     srt_path: Path | None = None,
     f0_threshold: float = 200.0,
     adaptive_threshold: bool = True,
@@ -237,40 +182,19 @@ def separate_three_stems(
     min_speakers: int = 1,
     max_speakers: int = 4,
     hf_token: str | None = None,
-    separator_backend: str = "bs_roformer",
-    demucs_model: str = "htdemucs",
-    demucs_shifts: int = 1,
     roformer_model: str = DEFAULT_ROFORMER_MODEL,
     roformer_mode: str = DEFAULT_ROFORMER_MODE,
     roformer_ensemble_preset: str | None = DEFAULT_ROFORMER_ENSEMBLE_PRESET,
     roformer_vocals_model: str | None = None,
     roformer_inst_model: str | None = None,
     roformer_overlap: int | None = None,
-    slice_pad_ms: int = 120,
-    slice_pad_end_ms: int | None = None,
-    align_short_segments: bool | None = None,
-    fill_gap_ms: int = 400,
-    shout_min_ms: int = 600,
-    shout_tail_pad_ms: int = 250,
-    shout_all_islands: bool = False,
-    recover_window_vocals: bool | None = None,
     speaker_map_path: Path | None = None,
-    recover_vocal_bleed: bool | None = None,
-    bleed_leak_ratio: float = 0.70,
-    bleed_island_threshold: float = 0.12,
-    bleed_min_nv_voc_ratio: float = 1.5,
-    bleed_min_excess_ratio: float = 0.15,
-    bleed_bgm_attenuate: float = 0.85,
-    bleed_fade_ms: float = 8.0,
 ) -> ThreeStemResult:
     """分离背景/人声, 再自动切分男/女两轨。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     instrumental, vocals = _separate_vocal_stems(
         audio_wav,
         work_dir,
-        separator_backend=separator_backend,
-        demucs_model=demucs_model,
-        demucs_shifts=demucs_shifts,
         roformer_model=roformer_model,
         roformer_mode=roformer_mode,
         roformer_ensemble_preset=roformer_ensemble_preset,
@@ -279,19 +203,14 @@ def separate_three_stems(
         roformer_overlap=roformer_overlap,
     )
 
-    separator_meta = {"backend": separator_backend}
-    if separator_backend == "bs_roformer":
-        separator_meta = _build_roformer_meta(
-            roformer_model=roformer_model,
-            roformer_mode=roformer_mode,
-            ensemble_preset=roformer_ensemble_preset,
-            vocals_model=roformer_vocals_model,
-            inst_model=roformer_inst_model,
-            overlap=roformer_overlap,
-        )
-    else:
-        separator_meta["model"] = demucs_model
-        separator_meta["demucs_shifts"] = demucs_shifts
+    separator_meta = _build_roformer_meta(
+        roformer_model=roformer_model,
+        roformer_mode=roformer_mode,
+        ensemble_preset=roformer_ensemble_preset,
+        vocals_model=roformer_vocals_model,
+        inst_model=roformer_inst_model,
+        overlap=roformer_overlap,
+    )
 
     bgm_out = out_dir / f"{stem}_no_vocals.wav"
     vocals_out = out_dir / f"{stem}_vocals.wav"
@@ -310,7 +229,6 @@ def separate_three_stems(
         female_out,
         report_out,
         split_mode=split_mode,
-        gender_backend=gender_backend,
         srt_path=srt_path,
         f0_threshold=f0_threshold,
         adaptive_threshold=adaptive_threshold,
@@ -321,24 +239,7 @@ def separate_three_stems(
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         hf_token=hf_token,
-        work_dir=work_dir,
-        slice_pad_ms=slice_pad_ms,
-        slice_pad_end_ms=slice_pad_end_ms,
-        align_short_segments=align_short_segments,
-        fill_gap_ms=fill_gap_ms,
-        shout_min_ms=shout_min_ms,
-        shout_tail_pad_ms=shout_tail_pad_ms,
-        shout_all_islands=shout_all_islands,
-        recover_window_vocals=recover_window_vocals,
         speaker_map_path=speaker_map_path,
-        no_vocals_path=bgm_out,
-        recover_vocal_bleed=recover_vocal_bleed,
-        bleed_leak_ratio=bleed_leak_ratio,
-        bleed_island_threshold=bleed_island_threshold,
-        bleed_min_nv_voc_ratio=bleed_min_nv_voc_ratio,
-        bleed_min_excess_ratio=bleed_min_excess_ratio,
-        bleed_bgm_attenuate=bleed_bgm_attenuate,
-        bleed_fade_ms=bleed_fade_ms,
         separator_meta=separator_meta,
     )
 
@@ -347,6 +248,88 @@ def separate_three_stems(
         vocals=vocals_out,
         male_vocals=male_out,
         female_vocals=female_out,
+        report=report_out,
+    )
+
+
+def separate_multi_stems(
+    audio_wav: Path,
+    out_dir: Path,
+    stem: str,
+    work_dir: Path,
+    *,
+    split_mode: str = "diarize",
+    min_speakers: int = 1,
+    max_speakers: int = 4,
+    hf_token: str | None = None,
+    diarization_model: str = DEFAULT_DIARIZATION_MODEL,
+    embedding_model: str = DEFAULT_ANIME_EMBEDDING_MODEL,
+    use_embedding: bool = True,
+    bss_backend: str = "auto",
+    roformer_model: str = DEFAULT_ROFORMER_MODEL,
+    roformer_mode: str = DEFAULT_ROFORMER_MODE,
+    roformer_ensemble_preset: str | None = DEFAULT_ROFORMER_ENSEMBLE_PRESET,
+    roformer_vocals_model: str | None = None,
+    roformer_inst_model: str | None = None,
+    roformer_overlap: int | None = None,
+) -> MultiStemResult:
+    """分离背景/人声, 再按日记化输出 N 条 speaker 轨。"""
+    if split_mode not in ("diarize", "diarize_bss"):
+        raise ValueError(
+            f"multi-stems 仅支持 diarize/diarize_bss, 收到: {split_mode}"
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    instrumental, vocals = _separate_vocal_stems(
+        audio_wav,
+        work_dir,
+        roformer_model=roformer_model,
+        roformer_mode=roformer_mode,
+        roformer_ensemble_preset=roformer_ensemble_preset,
+        roformer_vocals_model=roformer_vocals_model,
+        roformer_inst_model=roformer_inst_model,
+        roformer_overlap=roformer_overlap,
+    )
+
+    separator_meta = _build_roformer_meta(
+        roformer_model=roformer_model,
+        roformer_mode=roformer_mode,
+        ensemble_preset=roformer_ensemble_preset,
+        vocals_model=roformer_vocals_model,
+        inst_model=roformer_inst_model,
+        overlap=roformer_overlap,
+    )
+
+    bgm_out = out_dir / f"{stem}_no_vocals.wav"
+    vocals_out = out_dir / f"{stem}_vocals.wav"
+    report_out = out_dir / f"{stem}_split_report.json"
+
+    shutil.copy2(instrumental, bgm_out)
+    shutil.copy2(vocals, vocals_out)
+    print(f"已写入: {bgm_out}")
+    print(f"已写入: {vocals_out}")
+
+    _, speaker_paths = split_vocals_by_speaker(
+        vocals_out,
+        out_dir,
+        stem,
+        report_out,
+        split_mode=split_mode,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        hf_token=hf_token,
+        diarization_model=diarization_model,
+        embedding_model=embedding_model,
+        use_embedding=use_embedding,
+        bss_backend=bss_backend,
+        work_dir=work_dir,
+        separator_meta=separator_meta,
+    )
+
+    return MultiStemResult(
+        instrumental=bgm_out,
+        vocals=vocals_out,
+        speaker_paths=speaker_paths,
         report=report_out,
     )
 
@@ -373,9 +356,6 @@ def prepare_vocal_assets(
     work_dir: Path,
     need_stems: bool,
     need_voice_ref: bool,
-    separator_backend: str = "bs_roformer",
-    demucs_model: str = "htdemucs",
-    demucs_shifts: int = 1,
     roformer_model: str = DEFAULT_ROFORMER_MODEL,
     roformer_mode: str = DEFAULT_ROFORMER_MODE,
     roformer_ensemble_preset: str | None = DEFAULT_ROFORMER_ENSEMBLE_PRESET,
@@ -396,9 +376,6 @@ def prepare_vocal_assets(
         instrumental, vocals = _separate_vocal_stems(
             source_audio,
             work_dir,
-            separator_backend=separator_backend,
-            demucs_model=demucs_model,
-            demucs_shifts=demucs_shifts,
             roformer_model=roformer_model,
             roformer_mode=roformer_mode,
             roformer_ensemble_preset=roformer_ensemble_preset,
@@ -427,9 +404,6 @@ def prepare_vocal_assets(
                 _, vocals_path = _separate_vocal_stems(
                     source_audio,
                     work_dir,
-                    separator_backend=separator_backend,
-                    demucs_model=demucs_model,
-                    demucs_shifts=demucs_shifts,
                     roformer_model=roformer_model,
                     roformer_mode=roformer_mode,
                     roformer_ensemble_preset=roformer_ensemble_preset,

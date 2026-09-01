@@ -1,0 +1,50 @@
+[
+  {
+    "dir": "/home/tars/Code/video2text/out_roformer",
+    "window": "#22 BGM 93-104s",
+    "t0": 93.0,
+    "t1": 104.0,
+    "nv_rms": 0.042645,
+    "nv_v_ratio": 7.0876
+  },
+  {
+    "dir": "/home/tars/Code/video2text/out_roformer",
+    "window": "#26 好温暖 129-142.5s",
+    "t0": 129.0,
+    "t1": 142.5,
+    "nv_rms": 0.037914,
+    "nv_v_ratio": 6.9545
+  },
+  {
+    "dir": "/home/tars/Code/video2text/out_roformer",
+    "window": "full",
+    "t0": 0.0,
+    "t1": 160.0,
+    "nv_rms": 0.026858,
+    "nv_v_ratio": 1.4227
+  },
+  {
+    "dir": "/home/tars/Code/video2text/ab_fv7z",
+    "window": "#22 BGM 93-104s",
+    "t0": 93.0,
+    "t1": 104.0,
+    "nv_rms": 0.002833,
+    "nv_v_ratio": 1.0
+  },
+  {
+    "dir": "/home/tars/Code/video2text/ab_fv7z",
+    "window": "#26 好温暖 129-142.5s",
+    "t0": 129.0,
+    "t1": 142.5,
+    "nv_rms": 0.003957,
+    "nv_v_ratio": 1.0
+  },
+  {
+    "dir": "/home/tars/Code/video2text/ab_fv7z",
+    "window": "full",
+    "t0": 0.0,
+    "t1": 160.0,
+    "nv_rms": 0.018746,
+    "nv_v_ratio": 1.0
+  }
+]

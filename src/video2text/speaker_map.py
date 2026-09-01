@@ -146,61 +146,6 @@ def _is_strong_text_hint(text: str, hint: str) -> bool:
     return False
 
 
-_SHOUT_NAME_VARIANTS = frozenset(
-    {
-        "桔梗",
-        "桔梗。",
-        "桔梗！",
-        "桔梗...",
-        "犬夜叉",
-        "犬夜叉。",
-        "犬夜叉！",
-        "犬夜叉...",
-    }
-)
-
-
-def is_shout_name(text: str) -> bool:
-    """纯喊名 (桔梗 / 犬夜叉 及标点变体)。"""
-    t = text.strip()
-    if t in _SHOUT_NAME_VARIANTS:
-        return True
-    core = t.rstrip("。！？!?….")
-    return core in ("桔梗", "犬夜叉")
-
-
-def is_phrase_long_window_cue(seg: dict, *, long_window_sec: float = 5.0) -> bool:
-    """情感/长句: 不应走 shout 单 burst 收紧。"""
-    text = (seg.get("text") or "").strip()
-    if not text or is_shout_name(text):
-        return False
-    start = float(seg.get("start", 0.0))
-    end = float(seg.get("end", start))
-    duration = max(0.0, end - start)
-    hint = _text_gender_hint(text)
-    if hint and _is_strong_text_hint(text, hint):
-        return True
-    return len(text) > 4 and duration > long_window_sec
-
-
-def classify_cue_align_type(seg: dict, *, long_window_sec: float = 5.0) -> str:
-    """
-    对齐策略: shout | phrase_long_window | short_dialogue | none
-    """
-    text = (seg.get("text") or "").strip()
-    start = float(seg.get("start", 0.0))
-    end = float(seg.get("end", start))
-    duration = max(0.0, end - start)
-
-    if is_phrase_long_window_cue(seg, long_window_sec=long_window_sec):
-        return "phrase_long_window"
-    if is_shout_name(text) or (duration > long_window_sec and len(text) <= 4):
-        return "shout"
-    if duration <= 3.0:
-        return "short_dialogue"
-    return "none"
-
-
 def apply_speaker_map_override(
     assignments: list[dict],
     report: list[dict],
@@ -536,7 +481,7 @@ def main() -> int:
         "--vocals",
         type=Path,
         default=None,
-        help="Demucs 人声 wav (如 *_vocals.wav)",
+        help="分离人声 wav (如 *_vocals.wav)",
     )
     parser.add_argument(
         "--whisper-dir",

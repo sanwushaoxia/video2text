@@ -218,7 +218,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--voice-ref",
         default=None,
-        help="音色参考音频 (wav/mp3); 未指定时从 Demucs 人声自动截取",
+        help="音色参考音频 (wav/mp3); 未指定时从分离人声轨自动截取",
     )
     p.add_argument(
         "--voice-ref-text",

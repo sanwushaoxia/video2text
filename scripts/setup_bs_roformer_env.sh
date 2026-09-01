@@ -15,7 +15,7 @@ conda create -n "$ENV_NAME" python=3.12 -y
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 
-pip install torch torchaudio soundfile numpy tqdm imageio-ffmpeg demucs
+pip install torch torchaudio soundfile numpy tqdm imageio-ffmpeg
 pip install -r "$ROOT/requirements-bs-roformer.txt"
 
 echo "环境 $ENV_NAME 就绪。验证:"
