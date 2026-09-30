@@ -99,6 +99,14 @@ def main() -> int:
                 f"coverage {stats.get('coverage_ratio', 0):.0%}, "
                 f"unassigned {stats.get('unassigned_vocal_sec', 0):.1f}s"
             )
+            refine = (meta or {}).get("refine_stats") or {}
+            if refine:
+                print(
+                    f"  refine: merged={refine.get('merged_turn_count', 0)}, "
+                    f"relabeled={refine.get('relabeled_count', 0)}, "
+                    f"filtered={refine.get('filtered_count', 0)}, "
+                    f"avg_conf={refine.get('avg_confidence', 0):.2f}"
+                )
             rows.append({"dir": str(d), "stats": stats})
         if overlap_bss:
             print(
@@ -107,6 +115,20 @@ def main() -> int:
                 f"({overlap_bss.get('backend_used', 'n/a')})"
             )
             rows.append({"dir": str(d), "overlap_bss": overlap_bss})
+
+        if tracks and windows:
+            best_by_window: dict[str, tuple[str, float]] = {}
+            for label, t0, t1 in windows:
+                best_track = ""
+                best_rms = -1.0
+                for track in tracks:
+                    r = rms(track, t0, t1)
+                    if r > best_rms:
+                        best_rms = r
+                        best_track = track.name
+                best_by_window[label] = (best_track, best_rms)
+            print(f"  推荐归属 (各窗口 RMS 最高轨): {best_by_window}")
+            rows.append({"dir": str(d), "recommended_by_window": best_by_window})
 
     if args.json_out:
         args.json_out.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")

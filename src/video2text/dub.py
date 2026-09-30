@@ -347,8 +347,9 @@ def _rvc_convert(
         _rvc_convert_inprocess(src_wav, out_wav, config.rvc_model, config.rvc_index)
     except ImportError as exc:
         raise RuntimeError(
-            "未安装 rvc-python, 请 pip install -r requirements-rvc.txt "
-            "或配置 --rvc-api 指向本地 RVC 服务"
+            "未安装 rvc-python: 用 --rvc-api 指向本地 RVC 服务, "
+            "或在 Python 3.10/3.11 + pip<24.1 环境单独安装 rvc-python "
+            "(其 faiss-cpu/omegaconf 依赖有硬性 pin, 默认 requirements.txt 已移除)"
         ) from exc
 
 def _http_download(url: str, out_path: Path, *, timeout: float = 180.0) -> None:

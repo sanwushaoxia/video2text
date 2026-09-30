@@ -151,6 +151,7 @@ def _separate_vocal_stems(
     roformer_vocals_model: str | None = None,
     roformer_inst_model: str | None = None,
     roformer_overlap: int | None = None,
+    roformer_model_dir: Path | str | None = None,
 ) -> tuple[Path, Path]:
     """BS-RoFormer 双轨分离: 返回 (no_vocals/instrumental, vocals)。"""
     return separate_vocals_bs_roformer(
@@ -162,6 +163,7 @@ def _separate_vocal_stems(
         vocals_model=roformer_vocals_model,
         inst_model=roformer_inst_model,
         overlap=roformer_overlap,
+        model_dir=roformer_model_dir,
     )
 
 
@@ -189,6 +191,7 @@ def separate_three_stems(
     roformer_inst_model: str | None = None,
     roformer_overlap: int | None = None,
     speaker_map_path: Path | None = None,
+    roformer_model_dir: Path | str | None = None,
 ) -> ThreeStemResult:
     """分离背景/人声, 再自动切分男/女两轨。"""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -201,6 +204,7 @@ def separate_three_stems(
         roformer_vocals_model=roformer_vocals_model,
         roformer_inst_model=roformer_inst_model,
         roformer_overlap=roformer_overlap,
+        roformer_model_dir=roformer_model_dir,
     )
 
     separator_meta = _build_roformer_meta(
@@ -266,12 +270,25 @@ def separate_multi_stems(
     embedding_model: str = DEFAULT_ANIME_EMBEDDING_MODEL,
     use_embedding: bool = True,
     bss_backend: str = "auto",
+    refine_embedding: bool = True,
+    merge_turn_gap: float = 0.4,
+    min_turn_sec: float = 0.5,
+    min_similarity: float = 0.35,
+    fill_unassigned: bool = True,
+    diarize_preprocess: bool = True,
+    overlap_min_sec: float = 0.15,
+    max_overlap_sec: float = 8.0,
+    drop_low_confidence: bool = False,
+    stem_min_similarity: float = 0.30,
+    stem_relabel_margin: float = 0.08,
+    fill_min_similarity: float = 0.25,
     roformer_model: str = DEFAULT_ROFORMER_MODEL,
     roformer_mode: str = DEFAULT_ROFORMER_MODE,
     roformer_ensemble_preset: str | None = DEFAULT_ROFORMER_ENSEMBLE_PRESET,
     roformer_vocals_model: str | None = None,
     roformer_inst_model: str | None = None,
     roformer_overlap: int | None = None,
+    roformer_model_dir: Path | str | None = None,
 ) -> MultiStemResult:
     """分离背景/人声, 再按日记化输出 N 条 speaker 轨。"""
     if split_mode not in ("diarize", "diarize_bss"):
@@ -289,6 +306,7 @@ def separate_multi_stems(
         roformer_vocals_model=roformer_vocals_model,
         roformer_inst_model=roformer_inst_model,
         roformer_overlap=roformer_overlap,
+        roformer_model_dir=roformer_model_dir,
     )
 
     separator_meta = _build_roformer_meta(
@@ -324,6 +342,18 @@ def separate_multi_stems(
         bss_backend=bss_backend,
         work_dir=work_dir,
         separator_meta=separator_meta,
+        refine_embedding=refine_embedding,
+        merge_turn_gap=merge_turn_gap,
+        min_turn_sec=min_turn_sec,
+        min_similarity=min_similarity,
+        fill_unassigned=fill_unassigned,
+        diarize_preprocess=diarize_preprocess,
+        overlap_min_sec=overlap_min_sec,
+        max_overlap_sec=max_overlap_sec,
+        drop_low_confidence=drop_low_confidence,
+        stem_min_similarity=stem_min_similarity,
+        stem_relabel_margin=stem_relabel_margin,
+        fill_min_similarity=fill_min_similarity,
     )
 
     return MultiStemResult(
@@ -362,6 +392,7 @@ def prepare_vocal_assets(
     roformer_vocals_model: str | None = None,
     roformer_inst_model: str | None = None,
     roformer_overlap: int | None = None,
+    roformer_model_dir: Path | str | None = None,
 ) -> VocalAssets:
     """分离人声/伴奏并可选提取音色参考片段。"""
     assets = VocalAssets()
@@ -382,6 +413,7 @@ def prepare_vocal_assets(
             roformer_vocals_model=roformer_vocals_model,
             roformer_inst_model=roformer_inst_model,
             roformer_overlap=roformer_overlap,
+            roformer_model_dir=roformer_model_dir,
         )
         assets.instrumental = instrumental
         assets.vocals = vocals
@@ -410,6 +442,7 @@ def prepare_vocal_assets(
                     roformer_vocals_model=roformer_vocals_model,
                     roformer_inst_model=roformer_inst_model,
                     roformer_overlap=roformer_overlap,
+                    roformer_model_dir=roformer_model_dir,
                 )
                 assets.vocals = vocals_path
             ref_out = out_dir / f"{video_stem}_voice_ref.wav"

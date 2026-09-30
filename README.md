@@ -41,17 +41,185 @@ src/
     speaker_map.py     # 生成 speaker_map.json
     transcribe.py      # 完整流水线 (同 transcribe_video.py)
 
-requirements.txt              # 核心依赖 (Whisper, edge-tts 等)
-requirements-bs-roformer.txt  # BS-RoFormer / audio-separator (分离后端)
-requirements-diarize.txt      # pyannote 日记化
-requirements-separation.txt   # speaker embedding + 重叠盲分离 (可选)
+requirements.txt              # 统一依赖 (PyPI PyTorch / CUDA 13 + Whisper + 分离 + 日记化 + OCR 等)
 scripts/
-  setup_bs_roformer_env.sh    # 创建 video2text-roformer conda 环境
+  setup_bs_roformer_env.sh    # 创建独立 conda 环境并安装全量依赖 (可选)
   compare_roformer_ab.py      # no_vocals 客观 A/B (RMS / nv/v)
   compare_speaker_sep.py      # 多角色轨能量 / 重叠分离 A/B
 ```
 
 根目录保留兼容入口：`transcribe_video.py`、`generate_speaker_map.py`（薄包装，转发到 `src/video2text`）。
+
+---
+
+## 命令速查（每个特性的完整可执行命令）
+
+以下命令均可直接复制执行（`video.mp4` 换成你的视频）。前置：`pip install -r requirements.txt`；Linux 需系统 `ffmpeg`（Windows 用 imageio-ffmpeg 自带）。
+
+### 0. 完整流水线（转写 → 字幕 → 配音 → 烧录，一键）
+
+```bash
+# 最简: 自动检测语言 + 转写 + 烧录字幕
+python transcribe_video.py video.mp4
+
+# 指定语言/模型/输出目录与字幕样式
+python transcribe_video.py video.mp4 --model small --language ja --out-dir ./out --font-size 28 --margin-v 48
+
+# 只出 SRT/文本, 不烧录
+python transcribe_video.py video.mp4 --no-burn
+
+# 已有 SRT 只重烧录 / 恢复不透明底框 / 强制 CPU
+python transcribe_video.py video.mp4 --burn-only --srt ./out/video.srt
+python transcribe_video.py video.mp4 --burn-only --box
+python transcribe_video.py video.mp4 --device cpu
+
+# 画面 OCR 硬字幕 + 中文 AI 配音 + 保留 BGM
+python transcribe_video.py video.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh
+
+# 完整: 翻译 + 配音 (GPT-SoVITS 需本地 API http://127.0.0.1:9880)
+python transcribe_video.py video.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh \
+  --dub-engine gpt-sovits --voice-ref-lang ja
+
+# 等价入口: python src/cli/transcribe.py (参数完全相同)
+```
+
+### 1. 音频/视频 → 字幕（Whisper 或 OCR）
+
+```bash
+# Whisper 转写 → <stem>.srt/.txt/.json (输出到 ./video_whisper/)
+python src/cli/audio_to_subs.py video.mp4
+python src/cli/audio_to_subs.py video.mp4 --model small --language zh --out-dir ./out
+
+# OCR 画面硬字幕
+python src/cli/extract_subs.py video.mp4 --source ocr --ocr-lang zh --ocr-fps 2
+# OCR + GPU 加速 (extract_subs 默认 GPU 关; 流水线里默认开)
+python src/cli/extract_subs.py video.mp4 --source ocr --ocr-lang zh --ocr-use-gpu
+# Whisper 模式 + 翻译为中文
+python src/cli/extract_subs.py video.mp4 --source whisper --translate-to zh
+```
+
+### 2. 人声/背景分离（BS-RoFormer，二轨）
+
+```bash
+# 默认: ensemble 专保伴奏 → video_vocals.wav + video_no_vocals.wav
+python src/cli/separate_audio.py video.mp4 --out-dir ./out
+
+# 换 ensemble preset / 单模型 / dual 双模型
+python src/cli/separate_audio.py video.mp4 --roformer-ensemble-preset instrumental_clean
+python src/cli/separate_audio.py video.mp4 --roformer-mode single \
+  --roformer-model model_bs_roformer_ep_317_sdr_12.9755.ckpt
+python src/cli/separate_audio.py video.mp4 --roformer-mode dual \
+  --roformer-vocals-model bs_roformer_vocals_revive_v3e_unwa.ckpt \
+  --roformer-inst-model mel_band_roformer_instrumental_fv7z_gabox.ckpt
+
+# 指定模型目录与 overlap
+python src/cli/separate_audio.py video.mp4 --roformer-model-dir ./models/roformer --roformer-overlap 16
+```
+
+### 3. 三轨分离（背景 / 男声 / 女声）
+
+```bash
+# 有 SRT (推荐, 精度最高): --srt 必给 (或自动查找 <stem>_whisper/<stem>.srt)
+python src/cli/separate_audio.py video.mp4 --out-dir ./out_3stem \
+  --three-stems --split-mode srt_f0 --srt ./out/video.srt
+
+# 无 SRT: Whisper 自动时间轴
+python src/cli/separate_audio.py video.mp4 --out-dir ./out_3stem \
+  --three-stems --split-mode whisper_f0 --language ja
+
+# pyannote 日记化时间轴 (需 HF_TOKEN)
+python src/cli/separate_audio.py video.mp4 --out-dir ./out_3stem \
+  --three-stems --split-mode diarize --max-speakers 2
+
+# 调参: F0 阈值 / 置信度
+python src/cli/separate_audio.py video.mp4 --three-stems --split-mode srt_f0 \
+  --srt ./out/video.srt --f0-threshold 200 --min-voiced-ratio 0.25 --no-adaptive-f0
+```
+
+### 4. 多轨分离（背景 / N 说话人，pyannote 日记化）
+
+```bash
+# 前置: HuggingFace 接受 pyannote 协议 + HF_TOKEN (或 --hf-token / 项目根 hf_token 文件)
+export HF_TOKEN=hf_xxxx
+
+# 先预检说话人数量 → *_speaker_count.json
+python src/cli/separate_audio.py video.mp4 --out-dir ./out_count \
+  --count-speakers --max-speakers 6
+
+# 按预检数量精确分离 (diarize=纯切分)
+python src/cli/separate_audio.py video.mp4 --out-dir ./out_multi \
+  --multi-stems --split-mode diarize --min-speakers 2 --max-speakers 2
+
+# 含重叠对白: 日记化 + 局部盲分离 (MossFormer2→SepFormer 自动回退)
+python src/cli/separate_audio.py video.mp4 --out-dir ./out_bss \
+  --multi-stems --split-mode diarize_bss --max-speakers 6 --bss-backend auto
+
+# 常用调参: 重叠窗口 / embedding 改标
+python src/cli/separate_audio.py video.mp4 --multi-stems --split-mode diarize_bss \
+  --overlap-min-sec 0.15 --max-overlap-sec 8 \
+  --merge-turn-gap 0.4 --min-similarity 0.35 --no-refine-embedding
+```
+
+### 5. 说话人映射（speaker_map.json）
+
+```bash
+# 前置: 目录内需同时有 *.srt 与 *_vocals.wav (先跑 1 和 2)
+python src/cli/speaker_map.py --whisper-dir ./out/video_whisper
+
+# 或显式指定
+python src/cli/speaker_map.py --srt ./out/video.srt --vocals ./out/video_vocals.wav -o ./out/speaker_map.json
+
+# 等价入口: python generate_speaker_map.py --whisper-dir ./out/video_whisper
+```
+
+### 6. 字幕 → AI 配音（edge / RVC / GPT-SoVITS）
+
+```bash
+# edge-tts (默认引擎, 需联网)
+# 注意: subs_to_audio 的选项必须写在视频路径之前 (argparse REMAINDER 限制)
+python src/cli/subs_to_audio.py --dub-lang zh --srt ./out/video.srt video.mp4 --dub-engine edge
+
+# 多角色男女声
+python src/cli/subs_to_audio.py --dub-lang zh --srt ./out/video.srt video.mp4 \
+  --dub-engine edge --dub-speaker-map ./out/speaker_map.json \
+  --dub-voice-female zh-CN-XiaoxiaoNeural --dub-voice-male zh-CN-YunxiNeural
+
+# GPT-SoVITS 音色克隆 (需本地启动 API, 默认 http://127.0.0.1:9880)
+python src/cli/subs_to_audio.py --dub-lang zh --srt ./out/video.srt video.mp4 \
+  --dub-engine gpt-sovits --voice-ref-lang ja
+
+# RVC (需角色 .pth: --rvc-model 必填; rvc-python 需单独安装或用 --rvc-api 服务)
+python src/cli/subs_to_audio.py --dub-lang zh --srt ./out/video.srt video.mp4 \
+  --dub-engine rvc --rvc-model /path/to/character.pth
+```
+
+### 7. 混音 / 烧录（单独执行）
+
+```bash
+# 配音 + BGM 混音 (三个参数均必填)
+python src/cli/mix_audio.py --dub ./out/video_dub.wav --bgm ./out/video_no_vocals.wav -o ./out/video_mixed.wav
+python src/cli/mix_audio.py --dub ./out/video_dub.wav --bgm ./out/video_no_vocals.wav \
+  -o ./out/video_mixed.wav --bgm-volume 0.8 --dub-volume 1.2
+
+# 烧录字幕 (--srt 必填)
+python src/cli/burn_subs.py video.mp4 --srt ./out/video.srt -o ./out/video_subtitled.mp4
+python src/cli/burn_subs.py video.mp4 --srt ./out/video.srt --font-size 28 --margin-v 48 --box
+```
+
+### 8. 辅助脚本
+
+```bash
+python scripts/prefetch_roformer_models.py      # 预下载 BS-RoFormer ckpt
+python scripts/prefetch_pyannote_models.py      # 预下载 pyannote 模型 (需 HF_TOKEN)
+python scripts/verify_diarize_setup.py          # 日记化部署自检
+python scripts/migrate_models_to_project.py --dry-run   # 迁移旧缓存到 models/
+bash scripts/run_multi_stems_diarize.sh video.mp4 ./out_multi diarize   # 一键多轨 (PY=python3 可换解释器)
+python scripts/compare_roformer_ab.py ./out_a ./out_b --json-out ab_compare.json  # 分离 A/B
+python scripts/compare_speaker_sep.py ./out_multi ./out_bss --stem 桔梗犬夜叉片段
+python tools/check_imports.py --smoke           # 开发自检 import 完整性
+```
+
+---
 
 **开发：** 修改 `src/` 后运行 `python tools/check_imports.py --smoke` 检查 import 与模块变量是否完整。
 
@@ -67,15 +235,16 @@ python src/cli/separate_audio.py video.mp4 --out-dir ./out
 
 # 2b. 三轨 (背景 + 男声 + 女声)
 python src/cli/separate_audio.py video.mp4 --out-dir ./out --three-stems --split-mode whisper_f0 --language ja
-# 纯音频日记化 (需 pip install -r requirements-diarize.txt 与 HF_TOKEN)
+# 纯音频日记化 (需 HF_TOKEN; 依赖已含于 requirements.txt)
 python src/cli/separate_audio.py video.mp4 --out-dir ./out --three-stems --split-mode diarize --max-speakers 4
 
 # 3. 生成多角色映射
 python src/cli/speaker_map.py --whisper-dir ./out
 
 # 4. 字幕转配音
-python src/cli/subs_to_audio.py video.mp4 --dub-lang zh --srt ./out/video.srt \
-  --dub-engine edge --dub-speaker-map ./out/speaker_map.json
+# 注意: subs_to_audio 的选项必须写在位置参数 (视频路径) 之前 (argparse REMAINDER 限制)
+python src/cli/subs_to_audio.py --dub-lang zh --srt ./out/video.srt \
+  video.mp4 --dub-engine edge --dub-speaker-map ./out/speaker_map.json
 
 # 5. 混合 BGM（若上一步未自动混音）
 python src/cli/mix_audio.py --dub ./out/video_dub.wav --bgm ./out/video_no_vocals.wav -o ./out/video_mixed.wav
@@ -94,7 +263,7 @@ python transcribe_video.py video.mp4 --dub --dub-lang zh
 ### 默认行为（无需额外参数）
 
 ```bash
-conda activate video2text-roformer   # 或已安装 audio-separator 的环境
+conda activate py312   # 或任何已安装 requirements.txt 的环境
 python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out
 ```
 
@@ -154,11 +323,100 @@ python scripts/compare_roformer_ab.py ./out_a ./out_b --json-out ab_compare.json
 
 ### BS-RoFormer 环境
 
+分离依赖已并入主 `requirements.txt`，直接安装即可：
+
+```bash
+pip install -r requirements.txt
+```
+
+若需独立环境（避免与其他项目冲突），可用脚本一键创建并安装全量依赖：
+
 ```bash
 bash scripts/setup_bs_roformer_env.sh video2text-roformer
 conda activate video2text-roformer
-# 或: pip install -r requirements-bs-roformer.txt
 ```
+
+### 首次运行 / 网络与离线
+
+首次分离需从 GitHub 下载 `download_checks.json`、ckpt 权重与 **yaml 模型配置**。若出现 `ConnectionError` / `ConnectTimeout`（无法访问 GitHub）：
+
+**1. 配置代理后重试**
+
+```bash
+export HTTPS_PROXY=http://127.0.0.1:7890
+export HTTP_PROXY=http://127.0.0.1:7890
+python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out
+```
+
+**2. 预下载到项目 models/ 目录（推荐）**
+
+模型默认位于项目 [`models/`](models/) 子目录（Git LFS 跟踪大文件），下载一次即可复用：
+
+| 子目录 | 内容 |
+|--------|------|
+| `models/roformer/` | BS-RoFormer ckpt + yaml + manifest |
+| `models/whisper/` | Whisper `.pt` 权重 |
+| `models/huggingface/` | pyannote 等 HF 模型 |
+| `models/speechbrain/` | ECAPA embedding、SepFormer |
+
+从旧 AppData / 用户缓存 **一次性迁移**：
+
+```bash
+python scripts/migrate_models_to_project.py --dry-run   # 预览
+python scripts/migrate_models_to_project.py             # 移动至 models/
+```
+
+预下载（新环境无缓存时）：
+
+```bash
+python scripts/prefetch_roformer_models.py
+python scripts/prefetch_pyannote_models.py   # 需 hf_token
+```
+
+环境变量覆盖（可选）：
+
+```bash
+export VIDEO2TEXT_MODELS_DIR=/path/to/models
+export VIDEO2TEXT_ROFORMER_MODEL_DIR=/path/to/roformer
+export HF_HOME=/path/to/huggingface
+```
+
+**Git LFS**（首次 clone 后）：
+
+```bash
+git lfs install
+git lfs pull
+```
+
+**3. CLI 指定模型目录**
+
+```bash
+python src/cli/separate_audio.py video.mp4 --out-dir ./out \
+  --roformer-model-dir ./models/roformer
+```
+
+**4. 减小首次下载量**（manifest 仍需要；ckpt 仅 1 个）
+
+```bash
+python src/cli/separate_audio.py video.mp4 --out-dir ./out \
+  --roformer-mode single --roformer-model model_bs_roformer_ep_317_sdr_12.9755.ckpt
+```
+
+离线 manifest 兜底：仓库 [`assets/roformer/download_checks.json`](assets/roformer/download_checks.json) 会在联网失败时自动复制到模型目录；**ckpt 仍需 prefetch 或手动放入模型目录**。
+
+默认 `instrumental_full` ensemble 在模型目录中需 **5 个文件**（prefetch 会校验）：
+
+| 文件 | 说明 |
+|------|------|
+| `download_checks.json` | 模型清单（可 bundled） |
+| `melband_roformer_inst_v1e_plus.ckpt` | ensemble 模型 1 (~871 MiB) |
+| `config_melbandroformer_inst.yaml` | 模型 1 配置（可 bundled） |
+| `mel_band_roformer_instrumental_becruily.ckpt` | ensemble 模型 2 (~871 MiB) |
+| `config_mel_band_roformer_instrumental_becruily.yaml` | 模型 2 配置（可 bundled） |
+
+yaml 配置离线兜底：[`assets/roformer/*.yaml`](assets/roformer/) 在 GitHub 不可达时自动复制到模型目录；**ckpt 无法 bundled，仍需 prefetch 或代理下载**。
+
+若仅缺 yaml（ckpt 已下完），可手动放入模型目录后重跑 `separate_audio`，无需重下 ckpt。
 
 ---
 
@@ -226,6 +484,8 @@ python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_3stem
 | `--roformer-vocals-model` | revive v3e | dual 模式人声 ckpt |
 | `--roformer-inst-model` | fv7z bleedless | dual 模式伴奏 ckpt |
 | `--roformer-overlap` | 模型 yaml | 提高如 `16` 增质量 |
+| `--roformer-model-dir` | 见上文 | 持久模型缓存目录 |
+| `VIDEO2TEXT_ROFORMER_MODEL_DIR` | 同上 | 环境变量等价于 `--roformer-model-dir` |
 | `--speaker-map` | 无 | 用已有 map 覆盖 gender 后重切 |
 
 **Report 字段** (`*_split_report.json`)：
@@ -247,14 +507,30 @@ python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_3stem
 | `*_speaker_speaker_00.wav` 等 | 各说话人片段叠加 |
 | `*_split_report.json` | 每段 speaker_id、重叠分离标记、覆盖率 |
 
-**原理：** 日记化标出「谁何时说」→ 非重叠段从 vocals **时间切分**；`diarize_bss` 模式下对重叠段 (0.2–3s) 调用 MossFormer2/SepFormer **局部盲分离**，再用 anime ECAPA embedding 归属到已有 speaker。
+**原理：** 日记化标出「谁何时说」→ 非重叠段从 vocals **时间切分**；`diarize_bss` 模式下对重叠段 (0.15–8s, `--overlap-min-sec`/`--max-overlap-sec` 可调) 调用 MossFormer2/SepFormer **局部盲分离**，再用 anime ECAPA embedding 归属到已有 speaker。
 
 **依赖：**
 
 ```bash
-pip install -r requirements-diarize.txt
-pip install -r requirements-separation.txt   # diarize_bss 需要
-export HF_TOKEN=hf_xxxx   # 接受 community-1 协议
+pip install -r requirements.txt   # 已含分离/日记化/盲分离全部依赖
+python scripts/prefetch_roformer_models.py
+
+# HuggingFace: Accept community-1 协议后任选其一
+export HF_TOKEN=hf_xxxx
+# 或写入项目根目录 hf_token (单行, 已 gitignore)
+# 国内: export HF_ENDPOINT=https://hf-mirror.com HF_HUB_ENABLE_HF_TRANSFER=0
+
+python scripts/verify_diarize_setup.py      # 检查依赖 + 预拉 pyannote
+python scripts/prefetch_pyannote_models.py  # 仅预下载日记化模型
+bash scripts/run_multi_stems_diarize.sh 桔梗犬夜叉片段.mp4 ./out_multi diarize
+```
+
+**双人对话（犬夜叉+桔梗）推荐：**
+
+```bash
+export HF_TOKEN=hf_xxxx
+python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_multi \
+  --multi-stems --split-mode diarize --min-speakers 2 --max-speakers 2
 ```
 
 **推荐命令：**
@@ -280,16 +556,48 @@ python scripts/compare_speaker_sep.py ./out_multi ./out_bss --stem 桔梗犬夜�
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
+| `--count-speakers` | 关 | 仅预检说话人数量, 输出 `*_speaker_count.json` 后退出 |
 | `--diarization-model` | community-1 | pyannote pipeline |
 | `--embedding-model` | litagin anime ECAPA | 重叠段 speaker 匹配 |
-| `--bss-backend` | auto | mossformer2 → sepformer 回退 |
-| `--no-embedding` | 关 | 禁用 embedding (仅 diarize_bss) |
+| `--bss-backend` | auto | mossformer2 → sepformer 回退 (2 路); 3 路自动用 sepformer 3mix |
+| `--no-embedding` | 关 | 禁用 embedding (diarize_bss / refine) |
+| `--refine-embedding` / `--no-refine-embedding` | 开 | 日记化后 embedding 合并碎段、改标、低置信过滤 |
+| `--merge-turn-gap` | 0.4 | 合并同 speaker 相邻碎段最大间隔 (秒) |
+| `--min-turn-sec` | 0.5 | 参与 speaker profile 的最短 turn (秒) |
+| `--min-similarity` | 0.35 | embedding 改标/过滤最低相似度 |
+| `--fill-unassigned` / `--no-fill-unassigned` | 开 | 未分配人声区间按 embedding 填充 |
+| `--diarize-preprocess` / `--no-diarize-preprocess` | 开 | 日记化前 vocals 峰值归一化 + 80Hz 高通 |
+| `--overlap-min-sec` | 0.15 | 重叠检测与 BSS 最小时长 (秒) |
+| `--max-overlap-sec` | 8.0 | 重叠段 BSS 盲分离最大时长 (秒) |
+
+**纯音频调优流程（不用 SRT）：**
+
+1. 先预检说话人数量：`--count-speakers --max-speakers 6`，输出 `*_speaker_count.json` 列出每位说话人时长
+2. 已知人数后精确分离：`--min-speakers N --max-speakers N`，可选 `--roformer-mode dual`
+3. 默认已开启 embedding refine 与未分配填充；若改标过激可 `--no-refine-embedding` 或提高 `--min-similarity`
+4. 含快速交替/叠话：试 `--split-mode diarize_bss --overlap-min-sec 0.15 --max-overlap-sec 8`
+5. A/B 对比与验收：
+
+```bash
+# 第一步: 说话人计数预检
+python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_count \
+  --count-speakers --max-speakers 6
+
+# 第二步: 精确分离 (把 N 换成预检结果的 speaker_count)
+python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_multi_v2 \
+  --multi-stems --split-mode diarize --min-speakers N --max-speakers N
+
+python scripts/compare_speaker_sep.py ./out_multi ./out_multi_v2 --stem 桔梗犬夜叉片段
+```
+
+验收参考（`桔梗犬夜叉片段`）：`split_report.json` 中 `coverage_ratio` ≥ 0.55；对比脚本默认窗 `93:104`、`129:142.5` 上正确角色轨 RMS 应高于错误轨；人工试听交替对白 ≥80% 在正确 `speaker_*` 轨。
 
 **准确率边界：**
 
-- 交替对白、N≤4：通常可用；短喊名/气声边界可能偏移。
+- 交替对白、N≤6：通常可用；短喊名/气声边界可能偏移。
 - 2 人重叠：`diarize_bss` 优于纯切分，但 WSJ0 训练模型对日语动漫需 A/B。
-- 3+ 人同时说话：当前仅 2spk 局部分离，仍可能串音。
+- 3 人重叠：`diarize_bss` 下自动调用 SepFormer 3mix 做 3 路盲分离，再用 embedding 归属；WSJ0-3mix 训练模型对日语动漫需 A/B。
+- 4+ 人同时说话：仍可能串音，建议先 `--count-speakers` 确认人数后分段处理。
 
 ---
 
@@ -322,14 +630,11 @@ ffmpeg -version
 # 进入项目并安装 Python 依赖
 cd /path/to/ai_model/model/video2text
 conda activate py312          # 若使用 conda
-pip install -r requirements.txt
+pip install -r requirements.txt   # 已含 PyTorch (PyPI, CUDA 13) + BS-RoFormer 等全部依赖
 
-# 人声分离 (BS-RoFormer ensemble 默认后端, 推荐独立环境)
-pip install -r requirements-bs-roformer.txt
-# 或: bash scripts/setup_bs_roformer_env.sh video2text-roformer
-
-# 有 NVIDIA GPU 时, 建议安装对应 CUDA 的 PyTorch
-# 参见 https://pytorch.org/get-started/locally/
+# 无 NVIDIA GPU 时改用 CPU 版 PyTorch:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt  # 已装的 CPU 版会被识别, 不重复下载
 ```
 
 ### 3. 使用
@@ -382,12 +687,12 @@ python transcribe_video.py /path/to/video.mp4 --subs-source ocr --ocr-lang zh --
 python transcribe_video.py /path/to/video.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh \
   --dub-engine gpt-sovits --voice-ref-lang ja
 
-# RVC 音色转换（需角色 .pth 模型）
-pip install -r requirements-rvc.txt
+# RVC 音色转换（需角色 .pth 模型; rvc-python 不含于主依赖, 需单独安装或用 --rvc-api）
 python transcribe_video.py /path/to/video.mp4 --dub-only --dub-srt ./out/demo.srt --dub-lang zh \
   --dub-engine rvc --rvc-model /path/to/character.pth
 
 # 多说话人：按 speaker_map.json 分男女 edge 音色
+# 前置: --whisper-dir 指向的目录需同时含 *.srt 与 *_vocals.wav (先跑 separate_audio.py)
 python generate_speaker_map.py --whisper-dir ./out/video_whisper
 python transcribe_video.py /path/to/video.mp4 --dub-only --dub-srt ./out/demo.srt --dub --dub-lang zh \
   --dub-engine edge --dub-speaker-map ./out/video_whisper/speaker_map.json \
@@ -450,10 +755,11 @@ conda activate py312
 # python -m venv .venv
 # .\.venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+pip install -r requirements.txt   # 已含 PyTorch (PyPI, CUDA 13) + 全部依赖
 
-# 有 NVIDIA GPU 时, 按官网命令安装 CUDA 版 PyTorch
-# https://pytorch.org/get-started/locally/
+# 无 NVIDIA GPU 时改用 CPU 版 PyTorch:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt  # 已装的 CPU 版会被识别, 不重复下载
 ```
 
 ### 4. 使用
@@ -494,9 +800,8 @@ python transcribe_video.py D:\videos\demo.mp4 --task translate --dub --no-burn
 # 画面 OCR 中文字幕 + 中文配音 + 保留 BGM
 python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh
 
-# GPT-SoVITS 克隆原角色声线
-python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh \
-  --dub-engine gpt-sovits
+# GPT-SoVITS 克隆原角色声线 (PowerShell 下一行写完, 勿用 bash 续行符)
+python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh --dub-engine gpt-sovits
 ```
 
 ### 5. Windows 常见问题
@@ -538,7 +843,7 @@ python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--model` | `base` | `tiny` / `base` / `small` / `medium` / `large-v3`；越大越准越慢 |
+| `--model` | `base` | `tiny` / `base` / `small` / `medium` / `large` / `large-v2` / `large-v3`；越大越准越慢 |
 | `--language` | 自动检测 | 如 `zh` `en` `ja` |
 | `--task` | `transcribe` | `translate` 则译成英文字幕 |
 | `--device` | 自动 | `cuda` / `cpu` |
@@ -577,7 +882,7 @@ python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --
 | 引擎 | 相似度 | 前置条件 |
 |------|--------|----------|
 | `edge`（默认） | 低 | 联网；`--dub-voice` 或 `--dub-speaker-map` 分男女音色 |
-| `rvc` | 中高 | `--rvc-model` 或 `--rvc-api`；可选 `pip install -r requirements-rvc.txt` |
+| `rvc` | 中高 | `--rvc-model`（必填，API 模式同样需要）+ 可选 `--rvc-index`/`--rvc-api`；rvc-python 需单独安装（Python 3.10/3.11 + pip<24.1，其 faiss-cpu/omegaconf 硬 pin 无法并入主 requirements），不便降级 pip 时用 `--rvc-api`+`--rvc-model` 指向本地 RVC 服务 |
 | `gpt-sovits` | 高 | 本地启动 GPT-SoVITS API；自动截取 `--voice-ref` |
 
 - 默认 **保留背景音乐**（BS-RoFormer ensemble 分离人声）；用 `--no-keep-bgm` 关闭。

@@ -1,0 +1,4 @@
+models/**/*.ckpt filter=lfs diff=lfs merge=lfs -text
+models/**/*.pt filter=lfs diff=lfs merge=lfs -text
+models/huggingface/** filter=lfs diff=lfs merge=lfs -text
+models/speechbrain/** filter=lfs diff=lfs merge=lfs -text

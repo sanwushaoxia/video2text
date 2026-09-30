@@ -14,6 +14,7 @@ if str(_SRC) not in sys.path:
 
 from video2text.ffmpeg_util import configure_ffmpeg, extract_stereo_audio
 from video2text.separate import _separate_vocal_stems, separate_multi_stems, separate_three_stems
+from video2text.diarization import estimate_speaker_count
 
 
 def _roformer_backend_label(args) -> str:
@@ -46,6 +47,11 @@ def main(argv=None) -> int:
         "--multi-stems",
         action="store_true",
         help="输出 N 条 speaker 轨 (BS-RoFormer + pyannote 日记化)",
+    )
+    p.add_argument(
+        "--count-speakers",
+        action="store_true",
+        help="仅运行日记化预检, 报告说话人数量与每人时长后退出 (不做切分)",
     )
     p.add_argument(
         "--split-mode",
@@ -109,6 +115,12 @@ def main(argv=None) -> int:
         help="MDXC overlap 窗口数 (默认模型 yaml 值, 提高如 16 可增质量)",
     )
     p.add_argument(
+        "--roformer-model-dir",
+        type=Path,
+        default=None,
+        help="RoFormer 模型目录 (默认项目 models/roformer; 可用 VIDEO2TEXT_ROFORMER_MODEL_DIR)",
+    )
+    p.add_argument(
         "--whisper-model",
         default="base",
         help="split-mode=whisper_f0 时的 Whisper 模型 (默认 base)",
@@ -166,6 +178,77 @@ def main(argv=None) -> int:
         "--no-embedding",
         action="store_true",
         help="diarize_bss 时禁用 anime embedding (仅用日记化 speaker_id)",
+    )
+    p.add_argument(
+        "--refine-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="日记化后用 embedding 合并碎段/改标/过滤 (默认开启)",
+    )
+    p.add_argument(
+        "--merge-turn-gap",
+        type=float,
+        default=0.4,
+        help="合并同 speaker 相邻碎段的最大间隔秒 (默认 0.4)",
+    )
+    p.add_argument(
+        "--min-turn-sec",
+        type=float,
+        default=0.5,
+        help="参与 speaker profile 的最短 turn 秒 (默认 0.5)",
+    )
+    p.add_argument(
+        "--min-similarity",
+        type=float,
+        default=0.35,
+        help="embedding 改标/过滤最低相似度 (默认 0.35)",
+    )
+    p.add_argument(
+        "--drop-low-confidence",
+        action="store_true",
+        help="丢弃 refine 后置信度低于 --min-similarity 的 turn (默认保留)",
+    )
+    p.add_argument(
+        "--stem-min-similarity",
+        type=float,
+        default=0.30,
+        help="切分/填充时 embedding 最低相似度 (默认 0.30)",
+    )
+    p.add_argument(
+        "--stem-relabel-margin",
+        type=float,
+        default=0.08,
+        help="切分覆写 speaker 所需 embedding margin (默认 0.08)",
+    )
+    p.add_argument(
+        "--fill-min-similarity",
+        type=float,
+        default=0.25,
+        help="未分配区间填充时的 embedding 最低相似度 (默认 0.25)",
+    )
+    p.add_argument(
+        "--fill-unassigned",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="对未分配人声区间按 embedding 填充 (默认开启)",
+    )
+    p.add_argument(
+        "--diarize-preprocess",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="日记化前对 vocals 峰值归一化+高通 (默认开启)",
+    )
+    p.add_argument(
+        "--overlap-min-sec",
+        type=float,
+        default=0.15,
+        help="重叠检测/BSS 最小时长秒 (默认 0.15)",
+    )
+    p.add_argument(
+        "--max-overlap-sec",
+        type=float,
+        default=8.0,
+        help="重叠段 BSS 盲分离最大时长秒 (默认 8.0; 旧值 3.0 会跳过长重叠)",
     )
     p.add_argument("--ffmpeg", default=None)
     p.add_argument("--ffprobe", default=None)
@@ -232,6 +315,11 @@ def main(argv=None) -> int:
         "roformer_vocals_model": args.roformer_vocals_model,
         "roformer_inst_model": args.roformer_inst_model,
         "roformer_overlap": args.roformer_overlap,
+        "roformer_model_dir": (
+            args.roformer_model_dir.expanduser().resolve()
+            if args.roformer_model_dir
+            else None
+        ),
     }
 
     with tempfile.TemporaryDirectory(prefix="v2t_stems_") as tmp:
@@ -242,6 +330,40 @@ def main(argv=None) -> int:
             audio_wav = work / "source.wav"
             print(f"提取音轨: {src.name}")
             extract_stereo_audio(src, audio_wav)
+
+        if args.count_speakers:
+            import json
+
+            try:
+                instrumental, vocals = _separate_vocal_stems(
+                    audio_wav, work, **roformer_kwargs
+                )
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+
+            report = estimate_speaker_count(
+                vocals,
+                max_speakers=args.max_speakers,
+                hf_token=args.hf_token,
+                model_id=args.diarization_model,
+                diarize_preprocess=args.diarize_preprocess,
+                work_dir=work,
+            )
+            report_path = out_dir / f"{stem}_speaker_count.json"
+            report_path.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            print(f"已写入: {report_path}")
+            print(
+                f"  识别到 {report['speaker_count']} 位说话人, "
+                f"{report['turn_count']} 段, "
+                f"{report['overlap_region_count']} 个重叠区间"
+            )
+            for sp, sec in report["per_speaker_sec"].items():
+                turns = report["per_speaker_turns"].get(sp, 0)
+                print(f"    {sp}: {sec:.1f}s ({turns} 段)")
+            return 0
 
         if args.multi_stems:
             try:
@@ -258,12 +380,25 @@ def main(argv=None) -> int:
                     embedding_model=args.embedding_model,
                     use_embedding=not args.no_embedding,
                     bss_backend=args.bss_backend,
+                    refine_embedding=args.refine_embedding,
+                    merge_turn_gap=args.merge_turn_gap,
+                    min_turn_sec=args.min_turn_sec,
+                    min_similarity=args.min_similarity,
+                    fill_unassigned=args.fill_unassigned,
+                    diarize_preprocess=args.diarize_preprocess,
+                    overlap_min_sec=args.overlap_min_sec,
+                    max_overlap_sec=args.max_overlap_sec,
+                    drop_low_confidence=args.drop_low_confidence,
+                    stem_min_similarity=args.stem_min_similarity,
+                    stem_relabel_margin=args.stem_relabel_margin,
+                    fill_min_similarity=args.fill_min_similarity,
                     roformer_model=args.roformer_model,
                     roformer_mode=args.roformer_mode,
                     roformer_ensemble_preset=args.roformer_ensemble_preset,
                     roformer_vocals_model=args.roformer_vocals_model,
                     roformer_inst_model=args.roformer_inst_model,
                     roformer_overlap=args.roformer_overlap,
+                    roformer_model_dir=roformer_kwargs["roformer_model_dir"],
                 )
             except (RuntimeError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
@@ -294,6 +429,7 @@ def main(argv=None) -> int:
                     roformer_vocals_model=args.roformer_vocals_model,
                     roformer_inst_model=args.roformer_inst_model,
                     roformer_overlap=args.roformer_overlap,
+                    roformer_model_dir=roformer_kwargs["roformer_model_dir"],
                     speaker_map_path=(
                         args.speaker_map.expanduser().resolve()
                         if args.speaker_map

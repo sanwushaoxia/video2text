@@ -5,3 +5,4 @@ __pycache__/*
 src/cli/__pycache__/*
 src/video2text/__pycache__/*
 *.log
+**/hf_token

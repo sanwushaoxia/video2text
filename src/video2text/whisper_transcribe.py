@@ -8,8 +8,12 @@ from pathlib import Path
 from video2text.ffmpeg_util import _load_whisper_audio
 
 
+from video2text.paths import whisper_model_dir
+
+
 def _whisper_model_cache_path(model_name: str) -> Path:
-    return Path.home() / ".cache" / "whisper" / f"{model_name}.pt"
+    whisper_model_dir().mkdir(parents=True, exist_ok=True)
+    return whisper_model_dir() / f"{model_name}.pt"
 
 def load_whisper_model(model_name: str, device: str | None):
     import whisper
@@ -20,7 +24,9 @@ def load_whisper_model(model_name: str, device: str | None):
     print(f"加载 Whisper 模型: {model_name} (device={device})")
 
     try:
-        return whisper.load_model(model_name, device=device), device
+        return whisper.load_model(
+            model_name, device=device, download_root=str(whisper_model_dir())
+        ), device
     except RuntimeError as exc:
         message = str(exc)
         if "SHA256 checksum" not in message:
@@ -36,7 +42,9 @@ def load_whisper_model(model_name: str, device: str | None):
             cache_path.unlink(missing_ok=True)
 
         print("正在重新下载 Whisper 模型 (请保持网络畅通)...", file=sys.stderr)
-        return whisper.load_model(model_name, device=device), device
+        return whisper.load_model(
+            model_name, device=device, download_root=str(whisper_model_dir())
+        ), device
 
 def detect_and_transcribe(
     model,
