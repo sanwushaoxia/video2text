@@ -1,8 +1,12 @@
 # video2text（Whisper 视频语音识别与字幕）
 
-基于 [OpenAI Whisper](https://github.com/openai/whisper) 的视频转文字工具：自动识别视频语言、将音频转成文字，并把字幕烧录到画面下方。可选 **AI 配音**（edge-tts / RVC / GPT-SoVITS），默认 **保留背景音乐**（BS-RoFormer ensemble 人声分离）。
+从视频或音频生成带时间轴的字幕，支持 Whisper 转写、画面硬字幕 OCR 和已有 SRT。可选翻译、烧录字幕和 AI 配音（edge-tts / RVC / GPT-SoVITS）。配音默认通过 RoFormer 分离保留背景音。[OpenAI Whisper](https://github.com/openai/whisper)
+
+独立分轨命令支持人声/背景二轨、按性别三轨、按说话人多轨，以及叠话分离、试听和局部修正。批处理支持阶段缓存、完整结果缓存和性能报告。
 
 **同时支持 Linux 与 Windows**（Python + Whisper + edge-tts + ffmpeg）。
+
+[命令速查](#命令速查) · [模型文件与 Git LFS](#模型文件与-git-lfs) · [Linux 安装](#linux-部署与使用) · [Windows 安装](#windows-部署与使用)
 
 ---
 
@@ -23,9 +27,15 @@ src/
     f0_analysis.py     # 基频 (F0) 分析
     gender_split.py    # 自动男/女声切分
     diarization.py     # pyannote Community-1 日记化
+    diarization_refine.py # 声纹改标与碎段合并
     speaker_embedding.py  # 动漫 ECAPA embedding
     speaker_stems.py   # N 说话人轨切分
     overlap_separation.py  # 重叠段 MossFormer2/SepFormer 盲分离
+    overlap_tracking.py    # 结合邻近独白和相邻窗口做叠话归属
+    paths.py           # 模型目录与 Hugging Face 缓存路径
+    stage_cache.py     # 阶段缓存与原子发布
+    result_cache.py    # 完整分轨结果缓存
+    performance.py     # 阶段计时与资源统计
     dub.py             # AI 配音 (edge / RVC / GPT-SoVITS)
     mix.py             # 配音与 BGM 混音
     render.py          # 字幕烧录 / 音轨替换
@@ -35,26 +45,33 @@ src/
     extract_subs.py    # 提取字幕 (Whisper / OCR)
     burn_subs.py       # 烧录字幕到视频
     separate_audio.py  # 人声/伴奏分离 (默认 BS-RoFormer ensemble)
+    correct_overlap.py # 从试听缓存局部修正叠话归属
     audio_to_subs.py   # 音频 → 字幕 (Whisper)
     subs_to_audio.py   # 字幕 → AI 配音
     mix_audio.py       # 混合配音与伴奏
     speaker_map.py     # 生成 speaker_map.json
     transcribe.py      # 完整流水线 (同 transcribe_video.py)
 
-requirements.txt              # 统一依赖 (PyPI PyTorch / CUDA 13 + Whisper + 分离 + 日记化 + OCR 等)
+requirements.txt              # Python 依赖
+assets/roformer/              # 内置 RoFormer 模型清单和 YAML
+models/                       # 模型权重与缓存，部分由 Git LFS 提供
 scripts/
   setup_bs_roformer_env.sh    # 创建独立 conda 环境并安装全量依赖 (可选)
+  prefetch_roformer_models.py # 预下载 RoFormer 权重与配置
+  prefetch_pyannote_models.py # 预下载 pyannote 模型
+  batch_separate_audio.py     # 批量分轨与逐项报告
   compare_roformer_ab.py      # no_vocals 客观 A/B (RMS / nv/v)
   compare_speaker_sep.py      # 多角色轨能量 / 重叠分离 A/B
+tests/                        # 分轨、缓存及输出流程回归测试
 ```
 
 根目录保留兼容入口：`transcribe_video.py`、`generate_speaker_map.py`（薄包装，转发到 `src/video2text`）。
 
 ---
 
-## 命令速查（每个特性的完整可执行命令）
+## 命令速查
 
-以下命令均可直接复制执行（`video.mp4` 换成你的视频）。前置：`pip install -r requirements.txt`；Linux 需系统 `ffmpeg`（Windows 用 imageio-ffmpeg 自带）。
+在仓库根目录运行示例，将 `video.mp4` 和输入路径换成你的文件。先安装 `requirements.txt` 中的 Python 依赖。Linux 建议安装系统 FFmpeg，Windows 可用 `imageio-ffmpeg` 提供的 FFmpeg。使用默认 RoFormer 分离前，可按[模型文件与 Git LFS](#模型文件与-git-lfs)拉取权重。
 
 ### 0. 完整流水线（转写 → 字幕 → 配音 → 烧录，一键）
 
@@ -76,7 +93,7 @@ python transcribe_video.py video.mp4 --device cpu
 # 画面 OCR 硬字幕 + 中文 AI 配音 + 保留 BGM
 python transcribe_video.py video.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh
 
-# 完整: 翻译 + 配音 (GPT-SoVITS 需本地 API http://127.0.0.1:9880)
+# OCR 字幕 + GPT-SoVITS 配音 (需本地 API http://127.0.0.1:9880)
 python transcribe_video.py video.mp4 --subs-source ocr --ocr-lang zh --dub --dub-lang zh \
   --dub-engine gpt-sovits --voice-ref-lang ja
 
@@ -176,7 +193,7 @@ python src/cli/speaker_map.py --srt ./out/video.srt --vocals ./out/video_vocals.
 
 ```bash
 # edge-tts (默认引擎, 需联网)
-# 注意: subs_to_audio 的选项必须写在视频路径之前 (argparse REMAINDER 限制)
+# --srt / --dub-lang / --out-dir 放在视频路径之前，引擎参数放在路径之后
 python src/cli/subs_to_audio.py --dub-lang zh --srt ./out/video.srt video.mp4 --dub-engine edge
 
 # 多角色男女声
@@ -242,7 +259,7 @@ python src/cli/separate_audio.py video.mp4 --out-dir ./out --three-stems --split
 python src/cli/speaker_map.py --whisper-dir ./out
 
 # 4. 字幕转配音
-# 注意: subs_to_audio 的选项必须写在位置参数 (视频路径) 之前 (argparse REMAINDER 限制)
+# --srt / --dub-lang / --out-dir 放在视频路径之前，引擎参数放在路径之后
 python src/cli/subs_to_audio.py --dub-lang zh --srt ./out/video.srt \
   video.mp4 --dub-engine edge --dub-speaker-map ./out/speaker_map.json
 
@@ -336,87 +353,123 @@ bash scripts/setup_bs_roformer_env.sh video2text-roformer
 conda activate video2text-roformer
 ```
 
-### 首次运行 / 网络与离线
+### RoFormer 权重与离线运行
 
-首次分离需从 GitHub 下载 `download_checks.json`、ckpt 权重与 **yaml 模型配置**。若出现 `ConnectionError` / `ConnectTimeout`（无法访问 GitHub）：
+默认 `instrumental_full` 使用下表中的 5 个文件。仓库随 Git 提供清单和 YAML，两个 ckpt 通过 Git LFS 下载。权重和配置齐全时，推理直接从磁盘加载。
 
-**1. 配置代理后重试**
+| 文件 | 用途 |
+|------|------|
+| `download_checks.json` | 模型清单 |
+| `melband_roformer_inst_v1e_plus.ckpt` | ensemble 权重 1，约 871 MiB |
+| `config_melbandroformer_inst.yaml` | 模型 1 配置 |
+| `mel_band_roformer_instrumental_becruily.ckpt` | ensemble 权重 2，约 871 MiB |
+| `config_mel_band_roformer_instrumental_becruily.yaml` | 模型 2 配置 |
 
-```bash
-export HTTPS_PROXY=http://127.0.0.1:7890
-export HTTP_PROXY=http://127.0.0.1:7890
-python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out
-```
-
-**2. 预下载到项目 models/ 目录（推荐）**
-
-模型默认位于项目 [`models/`](models/) 子目录（Git LFS 跟踪大文件），下载一次即可复用：
-
-| 子目录 | 内容 |
-|--------|------|
-| `models/roformer/` | BS-RoFormer ckpt + yaml + manifest |
-| `models/whisper/` | Whisper `.pt` 权重 |
-| `models/huggingface/` | pyannote 等 HF 模型 |
-| `models/speechbrain/` | ECAPA embedding、SepFormer |
-
-从旧 AppData / 用户缓存 **一次性迁移**：
+使用其他 preset 或模型时，先运行预下载命令，并传入和分轨时相同的模型参数。自定义目录用 `--model-dir` 预下载，分轨时用 `--roformer-model-dir` 指向同一目录。缺少清单或默认配置时，程序可从仓库内的文件补齐。离线机器可从已下载的机器复制整套文件。若访问 GitHub 超时，可先将 `HTTPS_PROXY` 设为实际可用的代理地址再重试。[内置模型清单与配置](assets/roformer/)
 
 ```bash
-python scripts/migrate_models_to_project.py --dry-run   # 预览
-python scripts/migrate_models_to_project.py             # 移动至 models/
-```
-
-预下载（新环境无缓存时）：
-
-```bash
+# 下载并校验默认 ensemble
 python scripts/prefetch_roformer_models.py
-python scripts/prefetch_pyannote_models.py   # 需 hf_token
-```
 
-环境变量覆盖（可选）：
-
-```bash
-export VIDEO2TEXT_MODELS_DIR=/path/to/models
-export VIDEO2TEXT_ROFORMER_MODEL_DIR=/path/to/roformer
-export HF_HOME=/path/to/huggingface
-```
-
-**Git LFS**（首次 clone 后）：
-
-```bash
-git lfs install
-git lfs pull
-```
-
-**3. CLI 指定模型目录**
-
-```bash
-python src/cli/separate_audio.py video.mp4 --out-dir ./out \
-  --roformer-model-dir ./models/roformer
-```
-
-**4. 减小首次下载量**（manifest 仍需要；ckpt 仅 1 个）
-
-```bash
+# 只需一个权重的模式示例
+python scripts/prefetch_roformer_models.py --roformer-mode single \
+  --roformer-model model_bs_roformer_ep_317_sdr_12.9755.ckpt
 python src/cli/separate_audio.py video.mp4 --out-dir ./out \
   --roformer-mode single --roformer-model model_bs_roformer_ep_317_sdr_12.9755.ckpt
 ```
 
-离线 manifest 兜底：仓库 [`assets/roformer/download_checks.json`](assets/roformer/download_checks.json) 会在联网失败时自动复制到模型目录；**ckpt 仍需 prefetch 或手动放入模型目录**。
+---
 
-默认 `instrumental_full` ensemble 在模型目录中需 **5 个文件**（prefetch 会校验）：
+## 模型文件与 Git LFS
 
-| 文件 | 说明 |
-|------|------|
-| `download_checks.json` | 模型清单（可 bundled） |
-| `melband_roformer_inst_v1e_plus.ckpt` | ensemble 模型 1 (~871 MiB) |
-| `config_melbandroformer_inst.yaml` | 模型 1 配置（可 bundled） |
-| `mel_band_roformer_instrumental_becruily.ckpt` | ensemble 模型 2 (~871 MiB) |
-| `config_mel_band_roformer_instrumental_becruily.yaml` | 模型 2 配置（可 bundled） |
+| 默认目录 | 内容与获取方式 |
+|----------|----------------|
+| `models/roformer/` | 默认 ensemble 的两个权重走 LFS，清单和 YAML 随 Git。其他权重可用 RoFormer 预下载脚本获取 |
+| `models/whisper/` | Whisper 权重由转写命令首次加载时下载，本地目录受 `.gitignore` 管理 |
+| `models/huggingface/` | Hugging Face 缓存。已提交的普通文件按 LFS 规则处理，缺少的模型从 Hub 获取 |
+| `models/speechbrain/` | SpeechBrain 本地模型目录。SepFormer 等模型首次用到时可从 Hub 获取 |
 
-yaml 配置离线兜底：[`assets/roformer/*.yaml`](assets/roformer/) 在 GitHub 不可达时自动复制到模型目录；**ckpt 无法 bundled，仍需 prefetch 或代理下载**。
+默认以仓库的 `models/` 为根目录，可用 `VIDEO2TEXT_MODELS_DIR` 覆盖。RoFormer 和 Whisper 的独立覆盖变量分别是 `VIDEO2TEXT_ROFORMER_MODEL_DIR`、`VIDEO2TEXT_WHISPER_MODEL_DIR`。Hugging Face 用 `HF_HOME` 覆盖缓存根目录，用 `HF_HUB_CACHE` 单独覆盖 Hub 缓存。Git LFS 始终检出到仓库内的跟踪路径，程序按运行时设置的目录加载权重。
 
-若仅缺 yaml（ckpt 已下完），可手动放入模型目录后重跑 `separate_audio`，无需重下 ckpt。
+### 下载仓库里的大文件
+
+Ubuntu/Debian 可执行 `sudo apt install git-lfs`。Windows 可安装带有 Git LFS 的 Git for Windows，或单独安装 Git LFS。先验证客户端并初始化过滤器，再克隆仓库。默认克隆会自动下载当前分支的 LFS 文件。[Git LFS 安装文档](https://docs.github.com/en/repositories/working-with-files/managing-large-files/installing-git-large-file-storage)
+
+```bash
+git lfs version
+git lfs install
+git clone https://github.com/sanwushaoxia/video2text.git
+cd video2text
+```
+
+已有工作副本时，先切换到 `main`，再执行以下命令。如果模型文件只有以 `version https://git-lfs.github.com/spec/v1` 开头的几行文本，`git lfs pull origin` 会下载并检出实际内容。完整下载后可用 `git lfs fsck` 检查当前提交的本地 LFS 对象。
+
+```bash
+git lfs install --local
+git pull --ff-only origin main
+git lfs pull origin
+git lfs fsck
+```
+
+只要源码或部分模型时，可在克隆时跳过权重。下面只下载 RoFormer 目录中的 LFS 文件，两个默认权重合计约 1.70 GiB。若需要仓库里的全部权重，再运行 `git lfs pull origin`。在 PowerShell 中用 `$env:GIT_LFS_SKIP_SMUDGE = "1"` 设置变量，完成 `git clone` 后用 `Remove-Item Env:GIT_LFS_SKIP_SMUDGE` 清除，再执行拉取命令。[Git LFS pull 手册](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-pull.adoc)
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/sanwushaoxia/video2text.git
+cd video2text
+git lfs pull --include="models/roformer/**" origin
+git lfs ls-files --include="models/roformer/**" --size
+```
+
+### 按需下载与复用缓存
+
+首次使用说话人日记化前，在 Hugging Face 接受 Community-1 的访问条款，并设定 `HF_TOKEN` 或在仓库根目录的 `hf_token` 文件里写入一行 token。即使已有模型缓存，当前日记化入口仍会读取 token。[Community-1 模型页](https://huggingface.co/pyannote/speaker-diarization-community-1)
+
+```bash
+python scripts/prefetch_pyannote_models.py
+python scripts/migrate_models_to_project.py --dry-run
+```
+
+后一个命令预览旧 AppData 或用户缓存的迁移，确认后去掉 `--dry-run` 执行。当前仓库的 `models/speechbrain/sepformer-wsj02mix/` 内有指向原机器路径的符号链接。换机器后如果 SepFormer 加载失败，可用 `VIDEO2TEXT_MODELS_DIR` 指向新的本地模型目录，将已有的 RoFormer 权重和配置复制过去，再让 SpeechBrain 在新目录中按需建立缓存。Windows 上如果 Hugging Face 缓存里的符号链接被检出为文本，也可用新的 `HF_HOME` 重建缓存。
+
+### 提交与上传大文件
+
+仓库的 `.gitattributes` 已为 `models/` 下的 `*.ckpt`、`*.pt` 普通文件，以及 `models/huggingface/`、`models/speechbrain/` 下的普通文件配置 LFS。先在仓库中启用 LFS，再暂存实际要发布的权重。以下以 `new_model.ckpt` 为例，请换成实际文件名。[仓库 LFS 规则](.gitattributes)
+
+```bash
+git lfs version
+git lfs install --local
+git check-attr filter -- models/roformer/new_model.ckpt
+git add -- models/roformer/new_model.ckpt
+git lfs status
+git show :models/roformer/new_model.ckpt | git lfs pointer --check --stdin
+git commit -m "Add RoFormer model weights"
+git push origin main
+```
+
+`git check-attr` 应显示 `filter: lfs`，暂存区的指针检查退出码应为 0。已暂存但尚未提交的普通 blob 可在 LFS 启用后用 `git add --renormalize -- models/roformer/new_model.ckpt` 重新经过过滤，再检查一次指针。规则未覆盖的新路径可先用 `git lfs track "路径或通配规则"` 配置，并将 `.gitattributes` 与权重一同提交。逐个暂存权重和必要配置，避免把整个缓存、锁文件或凭据一起提交。
+
+普通 `git push` 会先通过 LFS 钩子上传对象，再更新 Git 分支。上传中断可重试同一命令，服务端已有的对象会被复用。GitHub LFS 用量计入仓库所有者的存储和下载额度。[GitHub LFS 计费](https://docs.github.com/en/billing/concepts/product-billing/git-lfs)
+
+### 修复未推送提交里的大文件
+
+如果推送因 `GH001` 被拒，先确认超限文件所在的提交。GitHub 对普通 Git 文件的上限是 100 MiB。涉及历史提交时，后续再提交一次删除或启用 LFS，旧 blob 仍会包含在推送里。[GitHub 大文件限制](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)
+
+下面适用于当前在 `main`、工作区干净、问题提交都尚未发布，且这些提交中的 `.gitattributes` 已覆盖相关文件的情况。先更新远端跟踪分支并检查 `git status --short --branch` 与 `git log origin/main..main --oneline`，确认只需处理本地提交。
+
+```bash
+git fetch origin
+git status --short --branch
+git log origin/main..main --oneline
+git branch backup/main-before-lfs main
+git lfs migrate import --fixup --include-ref=refs/heads/main --exclude-ref=refs/remotes/origin/main
+git lfs install --local
+git lfs checkout
+git lfs fsck origin/main..main
+git status --short --branch
+git push origin main
+```
+
+若刚启用 LFS 时，迁移误将原有普通 blob 显示为工作区修改，先用禁用过滤器的 `git -c filter.lfs.process= -c filter.lfs.clean= -c filter.lfs.smudge= -c filter.lfs.required=false status --short` 确认工作区确实干净，再把相同的 `-c` 参数放在迁移命令的 `git` 与 `lfs` 之间重试。迁移只重写本地待发布提交，随后用普通推送。[Git LFS migrate 手册](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-migrate.adoc)
 
 ---
 
@@ -576,6 +629,16 @@ python scripts/compare_speaker_sep.py ./out_multi ./out_bss --stem 桔梗犬夜�
 | `--overlap-min-sec` | 0.15 | BSS 最短时长 (秒)，更短的重叠保留到待复核轨 |
 | `--max-overlap-sec` | 8.0 | BSS 单窗最长时长 (秒) |
 
+对有叠话的片段，可同时比较原混音与分离后人声的日记化结果，结合邻近独白和相邻窗口判断声源归属，并保存试听所需的波形。
+
+```bash
+python src/cli/separate_audio.py video.mp4 --out-dir ./out_review \
+  --multi-stems --split-mode diarize_bss --diarization-source joint \
+  --overlap-tracking --save-overlap-review
+```
+
+修正时使用[影视评测与局部修正](#影视评测与局部修正)中的命令。
+
 **纯音频调优流程（不用 SRT）：**
 
 1. 先预检说话人数量：`--count-speakers --max-speakers 6`，输出 `*_speaker_count.json` 列出每位说话人时长
@@ -656,7 +719,7 @@ python scripts/batch_separate_audio.py a.mp4 b.mp4 --out-dir out_batch \
   --cache-dir out_stage_cache --device cpu --workers 2 --threads-per-worker 2
 ```
 
-批处理的每项任务都有独立目录、日志和性能 JSON。自动选择设备时用单个 worker。CPU 单权重 RoFormer 可通过 `--reuse-cpu-roformer` 在各 worker 内复用一份已加载模型。额外分离参数可放在 `--` 之后，例如 `-- --cache-results`。批次重试可把 `batch_report.json` 中失败的输入重新传入。
+批处理的每项任务都有独立目录、日志和性能 JSON。自动选择设备时用单个 worker。CPU 单权重 RoFormer 可通过 `--reuse-cpu-roformer` 在各 worker 内复用一份已加载模型。额外分离参数放在 `--` 之后。批量缓存完整多轨结果时，先在 `--` 之前指定 `--cache-dir`，再传入 `-- --multi-stems --split-mode diarize_bss --cache-results`。批次重试可把 `batch_report.json` 中失败的输入重新传入。
 
 在 i5-13490F 上，单任务、单 RoFormer 权重测试中，CPU 线程从 2 增至 4 后耗时下降 34%–40%，增至 8 的差异约 1%。单任务可将 `OMP_NUM_THREADS`、`MKL_NUM_THREADS` 和 `OPENBLAS_NUM_THREADS` 同时设为 4。批处理用 `--threads-per-worker` 控制每个 worker 的线程数。
 
@@ -701,20 +764,20 @@ python scripts/benchmark_speaker_tracks.py path/to/vocals.wav \
 
 - Python 3.10+（推荐 conda，如环境名 `py312`）
 - 系统 `ffmpeg`（含 `ffprobe`）
+- Git LFS（用于克隆或更新仓库里的模型权重）
 - GPU 可选（有 CUDA 时自动用 GPU）
 - 启用 `--dub` 时需联网（edge-tts 调用 Microsoft TTS 服务）
 
 ### 2. 安装
 
 ```bash
-# ffmpeg
 sudo apt update
-sudo apt install -y ffmpeg
-# 验证
+sudo apt install -y ffmpeg git-lfs
 ffmpeg -version
+git lfs version
 
 # 进入项目并安装 Python 依赖
-cd /path/to/ai_model/model/video2text
+cd /path/to/video2text
 conda activate py312          # 若使用 conda
 pip install -r requirements.txt   # 已含 PyTorch (PyPI, CUDA 13) + BS-RoFormer 等全部依赖
 
@@ -802,6 +865,7 @@ python transcribe_video.py /path/to/video.mp4 --dub-only --dub-srt ./out/demo.sr
 
 - Python 3.10+（[python.org](https://www.python.org/downloads/) 或 Miniconda/Anaconda）
 - `ffmpeg`：**推荐** `pip install -r requirements.txt`（含 `imageio-ffmpeg`，脚本会自动使用内置 ffmpeg，无需手动配置 PATH）；也可自行安装系统 ffmpeg
+- Git LFS（获取模型前运行 `git lfs version` 验证安装）
 - GPU 可选（需安装 CUDA 版 PyTorch）
 - 启用 `--dub` 时需联网（edge-tts 调用 Microsoft TTS 服务）
 
@@ -832,7 +896,7 @@ ffmpeg -version
 在 **PowerShell** 或 **cmd** 中：
 
 ```powershell
-cd C:\path\to\ai_model\model\video2text
+cd C:\path\to\video2text
 
 # 若使用 conda
 conda activate py312
@@ -987,4 +1051,4 @@ python transcribe_video.py D:\videos\demo.mp4 --subs-source ocr --ocr-lang zh --
 4. BS-RoFormer ensemble 分离人声与 BGM；默认将 AI 配音与 BGM 混合  
 5. 用 ffmpeg 输出最终视频：可选烧录字幕 + 替换音轨  
 
-首次运行会下载 Whisper / RoFormer 权重到本机缓存。
+Whisper 首次加载时会下载所选权重。默认 RoFormer ensemble 可先通过 Git LFS 拉取，其他模型按需下载。具体路径见[模型文件与 Git LFS](#模型文件与-git-lfs)。
