@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from video2text.performance import timed_stage
 from video2text.diarization import DiarizationTurn
 from video2text.speaker_embedding import (
     SpeakerEmbedder,
@@ -221,6 +222,7 @@ def turns_to_assignments_with_confidence(
     return assignments, report
 
 
+@timed_stage("speaker_refinement")
 def refine_diarization_turns(
     turns: list[DiarizationTurn],
     audio: np.ndarray,

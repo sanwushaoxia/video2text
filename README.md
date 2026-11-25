@@ -505,9 +505,10 @@ python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_3stem
 | `*_no_vocals.wav` | 背景音 |
 | `*_vocals.wav` | 混合人声 |
 | `*_speaker_speaker_00.wav` 等 | 各说话人片段叠加 |
+| `*_dialogue_review.wav` | `diarize_bss` 中未能可靠分离的叠话，以及未分配到角色轨的人声底轨片段，可能含背景残留 |
 | `*_split_report.json` | 每段 speaker_id、重叠分离标记、覆盖率 |
 
-**原理：** 日记化标出「谁何时说」→ 非重叠段从 vocals **时间切分**；`diarize_bss` 模式下对重叠段 (0.15–8s, `--overlap-min-sec`/`--max-overlap-sec` 可调) 调用 MossFormer2/SepFormer **局部盲分离**，再用 anime ECAPA embedding 归属到已有 speaker。
+日记化标出每位角色的发声时间。非重叠段直接切分，`diarize_bss` 对同时发声的区间调用 MossFormer2/SepFormer，再用单人片段提取的声纹做一对一归属。长重叠分窗处理，成功归属的相邻窗做短交叉淡化。相邻轮次推测出的重叠只记入报告。报告的 `overlap_bss.regions` 记录每段的样本边界、处理状态和原因。说话人轨与待复核轨以相同长度的 32 位浮点 WAV 输出。
 
 **依赖：**
 
@@ -558,8 +559,13 @@ python scripts/compare_speaker_sep.py ./out_multi ./out_bss --stem 桔梗犬夜�
 |------|------|------|
 | `--count-speakers` | 关 | 仅预检说话人数量, 输出 `*_speaker_count.json` 后退出 |
 | `--diarization-model` | community-1 | pyannote pipeline |
+| `--diarization-source` | vocals | 多轨日记化输入，`vocals` 用提取人声，`mix` 用原混音，`joint` 对齐双路角色后将有分歧的叠话送去复核 |
+| `--overlap-tracking` | 未启用 | 叠话归属结合整片独白声纹、邻近独白与连续分窗 |
+| `--save-overlap-review` | 未启用 | 保存每个已尝试分离的窗口，按 WAV 声道顺序试听并人工归属 |
+| `--background-output` | direct | `residual` 从对齐后的原混音减去提取对白，可与直接估计背景做 A/B |
+| `--overlap-review-threshold` | 未启用 | `diarize_bss` 中用 Community-1 的多人发声概率补充待复核区间。可从 `0.4` 开始验证，会增加一次分割模型推理 |
 | `--embedding-model` | litagin anime ECAPA | 重叠段 speaker 匹配 |
-| `--bss-backend` | auto | mossformer2 → sepformer 回退 (2 路); 3 路自动用 sepformer 3mix |
+| `--bss-backend` | auto | 双人支持 MossFormer2、SepFormer 和 `sepformer-whamr`。`auto` 双人先尝试 MossFormer2，三人使用 SepFormer 3mix |
 | `--no-embedding` | 关 | 禁用 embedding (diarize_bss / refine) |
 | `--refine-embedding` / `--no-refine-embedding` | 开 | 日记化后 embedding 合并碎段、改标、低置信过滤 |
 | `--merge-turn-gap` | 0.4 | 合并同 speaker 相邻碎段最大间隔 (秒) |
@@ -567,8 +573,8 @@ python scripts/compare_speaker_sep.py ./out_multi ./out_bss --stem 桔梗犬夜�
 | `--min-similarity` | 0.35 | embedding 改标/过滤最低相似度 |
 | `--fill-unassigned` / `--no-fill-unassigned` | 开 | 未分配人声区间按 embedding 填充 |
 | `--diarize-preprocess` / `--no-diarize-preprocess` | 开 | 日记化前 vocals 峰值归一化 + 80Hz 高通 |
-| `--overlap-min-sec` | 0.15 | 重叠检测与 BSS 最小时长 (秒) |
-| `--max-overlap-sec` | 8.0 | 重叠段 BSS 盲分离最大时长 (秒) |
+| `--overlap-min-sec` | 0.15 | BSS 最短时长 (秒)，更短的重叠保留到待复核轨 |
+| `--max-overlap-sec` | 8.0 | BSS 单窗最长时长 (秒) |
 
 **纯音频调优流程（不用 SRT）：**
 
@@ -590,14 +596,94 @@ python src/cli/separate_audio.py 桔梗犬夜叉片段.mp4 --out-dir ./out_multi
 python scripts/compare_speaker_sep.py ./out_multi ./out_multi_v2 --stem 桔梗犬夜叉片段
 ```
 
-验收参考（`桔梗犬夜叉片段`）：`split_report.json` 中 `coverage_ratio` ≥ 0.55；对比脚本默认窗 `93:104`、`129:142.5` 上正确角色轨 RMS 应高于错误轨；人工试听交替对白 ≥80% 在正确 `speaker_*` 轨。
+可用包含 `flite` 滤镜的 FFmpeg 生成固定双人混音，并测量已知叠话边界下的 SI-SDR。传入用 `mix_bg.wav` 生成分轨的目录后，还会测量背景轨误差和对白残留。
+
+```bash
+python scripts/benchmark_overlap.py ./out_overlap_benchmark
+python src/cli/separate_audio.py ./out_overlap_benchmark/mix_bg.wav --out-dir ./out_overlap_background
+python scripts/benchmark_overlap.py ./out_overlap_benchmark --background-dir ./out_overlap_background
+PYTHONPATH=src python -m unittest discover -s tests
+```
+
+### 跨录音留出评测
+
+以 AMI 的 ES2004a 和 EN2002a 分别作为开发集和留出集。每组包含两段真实会议片段，以及由该场会议独白制作的双人、三人混音。真实片段使用 AMI 人工说话人标注，受控混音另有逐角色和背景参考 WAV。音频来自 AMI Meeting Corpus（CC BY 4.0，AMI Consortium），时间标注来自 pyannote 的 `only_words` RTTM。[AMI 语料](https://groups.inf.ed.ac.uk/ami/corpus/) · [音频镜像](https://huggingface.co/datasets/FluidInference/ami-corpus-mirror/tree/722d8891643e1e4dc62cfd0d198fa05a1646c3cc) · [固定 RTTM 版本](https://github.com/pyannote/AMI-diarization-setup/tree/67c2d539286e89f68952d5dcf83912bd9f01dfae)
+
+```bash
+python scripts/prepare_generalization_benchmark.py out_generalization \
+  --rttm-zip ami-rttm.zip --dev ES2004a.Mix-Headset.wav --holdout EN2002a.Mix-Headset.wav
+python scripts/evaluate_overlap_generalization.py out_generalization/manifest.json \
+  --partition dev --output out_generalization/dev --prepare-vocals
+python scripts/evaluate_overlap_generalization.py out_generalization/manifest.json \
+  --partition holdout --output out_generalization/holdout --prepare-vocals
+```
+
+评测同时记录叠话精确率、召回率、实际分离比例、待复核比例、角色标签错误和背景对白泄漏。已知边界和最佳源排列的波形 SI-SDR 单独报告，便于定位分离模型本身的误差。使用 `--embedding-model wespeaker` 可比较 Community-1 自带的通用声纹。使用 `--backend sepformer-whamr` 可比较带混响训练的双人模型，三人仍使用 3mix。
+
+### 影视评测与局部修正
+
+`scripts/prepare_media_overlap_benchmark.py` 可生成日语 JVS 与普通话 AISHELL-3 受控混音，包含原对白、独立背景和音效参考。用 `--scenes` 可导入自有影视片段及独立人工 RTTM。片段清单中的 `group` 是作品 ID，`speakers` 将 RTTM 标签映射到跨作品一致的演员 ID。评测拒绝在开发集与留出集之间共用作品或演员。[JVS 演示录音](https://github.com/MontrealCorpusTools/japanese-jvs-demo) · [AISHELL-3 官方补充音频](https://sos1sos2sixteen.github.io/aishell3v2/)
+
+每个 `scenes` 条目提供 `id`、`group`、`partition`（`dev` 或 `holdout`）、`language`、`provenance`、`media`、`rttm`、`rttm_recording`、`start`、`end` 和 `speakers`。媒体和 RTTM 路径相对于清单。评测可通过 `--variants oracle oracle_tracking vocals mix tracking joint_tracking` 同时核对人工边界、单路和双路配置。有参考波形时，`reference_correct_role_fraction` 统计所有输出归属正确且各路 SI-SDR 都优于原混音的叠话时长比例。
+
+开启 `--save-overlap-review` 后，报告中带 `preview` 的区间可按声道试听。修正 JSON 以窗口 ID 为键，按声道顺序列出角色 ID，例如 `{"0:0": ["SPEAKER_01", "SPEAKER_00"]}`。以下命令从缓存声源写入新目录，原分轨及修正区间之外的样本保持原样。
+
+```bash
+python src/cli/correct_overlap.py out/video_split_report.json corrections.json --out-dir out_corrected
+```
+
+背景验收脚本对比两种背景输出，并生成配平响度的匿名 A/B 音频、替换配音片段和评分表。单片段清单可用 `--video` 提供原视频，同时导出 A/B 配音成片。独立背景参考存在时，同时报告对白泄漏、已标注音效窗的瞬态误差和切点误差。评分前可暂不查看 `answer_key.json`。
+
+```bash
+python scripts/evaluate_background_quality.py out_media_validation/manifest.json \
+  --out-dir out_background_review --replacement independent_dialogue.wav
+```
+
+### 性能基准、阶段缓存和批处理
+
+多轨混轨使用定长工作缓冲。与处理采样率一致且至少 10 分钟的 WAV 人声轨按需读取样本区间，其余输入共享一次人声解码。至少 10 分钟的输入会分批把已确认的叠话波形写入工作目录，混轨时按需读回。处理长时间连续叠话时，临时磁盘用量随实际分离的叠话时长和轨数增长，CLI 完成后清理工作目录。
+
+Linux 性能报告记录阶段墙钟时间、实时系数、进程 CPU 时间、磁盘计数、峰值 RSS、产物大小和缓存命中。CUDA 已初始化时也记录进程显存峰值，计时边界同步。阶段可嵌套，进程峰值在长驻批处理 worker 中为累计值。
+
+为缓存和性能报告选择输出目录之外的位置。`--cache-dir` 根据源文件内容、参数、已安装模型和运行环境复用解码、RoFormer 与日记化产物。失败后可用同样的命令重试，已完成的阶段可复用。为同一输入和配置重复导出时，加上 `--cache-results` 可跳过解码、模型推理和混轨，直接发布完整音轨与报告。该选项需要 `--multi-stems`，缓存目录会额外保存一套分轨。使用 `--atomic-output` 时，指定一个新输出目录，等全部分轨和报告成功后再发布。
+
+```bash
+python src/cli/separate_audio.py video.mp4 --multi-stems --split-mode diarize_bss \
+  --out-dir out_result --atomic-output --cache-dir out_stage_cache --cache-results \
+  --performance-report out_result_performance.json
+
+python scripts/batch_separate_audio.py a.mp4 b.mp4 --out-dir out_batch \
+  --cache-dir out_stage_cache --device cpu --workers 2 --threads-per-worker 2
+```
+
+批处理的每项任务都有独立目录、日志和性能 JSON。自动选择设备时用单个 worker。CPU 单权重 RoFormer 可通过 `--reuse-cpu-roformer` 在各 worker 内复用一份已加载模型。额外分离参数可放在 `--` 之后，例如 `-- --cache-results`。批次重试可把 `batch_report.json` 中失败的输入重新传入。
+
+在 i5-13490F 上，单任务、单 RoFormer 权重测试中，CPU 线程从 2 增至 4 后耗时下降 34%–40%，增至 8 的差异约 1%。单任务可将 `OMP_NUM_THREADS`、`MKL_NUM_THREADS` 和 `OPENBLAS_NUM_THREADS` 同时设为 4。批处理用 `--threads-per-worker` 控制每个 worker 的线程数。
+
+本地 RoFormer 权重及配置完整时，推理直接从磁盘加载。需要下载或恢复文件时才查询远端大小。CUDA 单模型可用 `VIDEO2TEXT_ROFORMER_PRECISION=fp16` 选择原生 FP16，两种精度各自使用缓存。默认使用 FP32。RTX 3060 上已用 `melband_roformer_inst_v1e_plus.ckpt` 对比日语和普通话参考片段，其他模型可通过同样的分离评测核验。使用标准 Linux PyTorch CUDA wheel 并显式设置 `OMP_NUM_THREADS` 或 `MKL_NUM_THREADS` 时，完整缓存命中可通过独立 CUDA 运行库检查设备，避免在主进程加载 PyTorch。
+
+```bash
+VIDEO2TEXT_ROFORMER_PRECISION=fp16 python src/cli/separate_audio.py video.mp4 \
+  --multi-stems --split-mode diarize_bss --roformer-mode single \
+  --roformer-model melband_roformer_inst_v1e_plus.ckpt --out-dir out_fast
+```
+
+混轨基准使用独立进程交错运行优化前后的实现，对所有解码 WAV 的 PCM 哈希和覆盖统计做一致性检查。长片测试可将短参考片段重复到指定时长。
+
+```bash
+python scripts/benchmark_speaker_tracks.py path/to/vocals.wav \
+  --baseline path/to/before/speaker_stems.py --seconds 3600 --pairs 1 \
+  --out out_bench/renderer.json
+```
+
+验收参考（`桔梗犬夜叉片段`）：在已标注的对白窗里检查角色归属和串轨。报告中的 `coverage_ratio` 以整段音频时长为分母，包含无对白的时段。
 
 **准确率边界：**
 
 - 交替对白、N≤6：通常可用；短喊名/气声边界可能偏移。
 - 2 人重叠：`diarize_bss` 优于纯切分，但 WSJ0 训练模型对日语动漫需 A/B。
 - 3 人重叠：`diarize_bss` 下自动调用 SepFormer 3mix 做 3 路盲分离，再用 embedding 归属；WSJ0-3mix 训练模型对日语动漫需 A/B。
-- 4+ 人同时说话：仍可能串音，建议先 `--count-speakers` 确认人数后分段处理。
+- 4+ 人同时说话：原片段保留在待复核轨。
 
 ---
 

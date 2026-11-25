@@ -12,9 +12,11 @@ _SRC = Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from video2text.ffmpeg_util import configure_ffmpeg, extract_stereo_audio
+from video2text.ffmpeg_util import _require_ffmpeg, configure_ffmpeg, extract_stereo_audio
 from video2text.separate import _separate_vocal_stems, separate_multi_stems, separate_three_stems
 from video2text.diarization import estimate_speaker_count
+from video2text.performance import collect_performance, mark_failed, record_audio_duration, stage
+from video2text.stage_cache import get_cache, publish_directory, use_cache
 
 
 def _roformer_backend_label(args) -> str:
@@ -166,18 +168,22 @@ def main(argv=None) -> int:
     p.add_argument(
         "--embedding-model",
         default="litagin/anime_speaker_embedding_by_va_ecapa_tdnn_groupnorm",
-        help="说话人 embedding 模型 (diarize_bss 重叠归属)",
+        help="说话人声纹模型，wespeaker 使用 Community-1 的通用声纹",
+    )
+    p.add_argument(
+        "--diarization-source", choices=("vocals", "mix", "joint"), default="vocals",
+        help="多轨日记化使用提取人声、原混音，或双路一致性检测",
     )
     p.add_argument(
         "--bss-backend",
-        choices=["auto", "mossformer2", "sepformer"],
+        choices=["auto", "mossformer2", "sepformer", "sepformer-whamr"],
         default="auto",
         help="重叠段盲分离 backend (diarize_bss)",
     )
     p.add_argument(
         "--no-embedding",
         action="store_true",
-        help="diarize_bss 时禁用 anime embedding (仅用日记化 speaker_id)",
+        help="禁用说话人声纹，无法归属的叠话保留到待复核轨",
     )
     p.add_argument(
         "--refine-embedding",
@@ -242,14 +248,28 @@ def main(argv=None) -> int:
         "--overlap-min-sec",
         type=float,
         default=0.15,
-        help="重叠检测/BSS 最小时长秒 (默认 0.15)",
+        help="BSS 最小时长秒，更短的重叠保留在待复核轨 (默认 0.15)",
     )
     p.add_argument(
         "--max-overlap-sec",
         type=float,
         default=8.0,
-        help="重叠段 BSS 盲分离最大时长秒 (默认 8.0; 旧值 3.0 会跳过长重叠)",
+        help="BSS 单次推理最大时长秒，长段自动分窗 (默认 8.0)",
     )
+    p.add_argument(
+        "--overlap-review-threshold", type=float,
+        help="可选的多人发声概率阈值。达到阈值的额外区间送入待复核轨",
+    )
+    p.add_argument("--overlap-tracking", action="store_true",
+                   help="结合整片独白、邻近独白和相邻分窗联合判断叠话归属")
+    p.add_argument("--save-overlap-review", action="store_true",
+                   help="缓存叠话分离的独立声源，供人工按区间修正")
+    p.add_argument("--background-output", choices=("direct", "residual"), default="direct",
+                   help="多轨背景使用模型直接输出，或使用原混音减去提取对白")
+    p.add_argument("--cache-results", action="store_true", help="缓存完整多轨结果，供同配置直接发布")
+    p.add_argument("--cache-dir", type=Path, help="复用已完成的解码、RoFormer 和日记化阶段")
+    p.add_argument("--atomic-output", action="store_true", help="多轨成功后一次发布到新的输出目录")
+    p.add_argument("--performance-report", type=Path, help="输出阶段计时与进程内存峰值 JSON")
     p.add_argument("--ffmpeg", default=None)
     p.add_argument("--ffprobe", default=None)
     args = p.parse_args(argv)
@@ -266,12 +286,42 @@ def main(argv=None) -> int:
         return 1
 
     out_dir = args.out_dir.expanduser().resolve() if args.out_dir else src.parent
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.atomic_output:
+        if args.out_dir is None or not args.multi_stems or args.count_speakers:
+            p.error("--atomic-output 需要 --multi-stems 和显式的新 --out-dir")
+        if args.performance_report and args.performance_report.expanduser().resolve().is_relative_to(out_dir):
+            p.error("--atomic-output 的性能报告需要位于输出目录之外")
+        if args.cache_dir and args.cache_dir.expanduser().resolve().is_relative_to(out_dir):
+            p.error("--atomic-output 的缓存需要位于输出目录之外")
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
     stem = args.stem or src.stem
+    if args.atomic_output and Path(stem).name != stem:
+        p.error("--atomic-output 的 --stem 需要是文件名前缀")
+
+    if args.cache_results and (not args.cache_dir or not args.multi_stems or args.count_speakers):
+        p.error("--cache-results 需要 --cache-dir 和 --multi-stems")
+    if args.cache_results and Path(stem).name != stem:
+        p.error("--cache-results 的 --stem 需要是文件名前缀")
 
     if args.three_stems and args.multi_stems:
         print("--three-stems 与 --multi-stems 不能同时使用", file=sys.stderr)
         return 1
+    if args.diarization_source != "vocals" and not args.multi_stems:
+        p.error("--diarization-source mix/joint 需要 --multi-stems")
+    if args.diarization_source == "joint" and args.split_mode != "diarize_bss":
+        p.error("--diarization-source joint 需要 --split-mode diarize_bss")
+    if args.background_output != "direct" and not args.multi_stems:
+        p.error("--background-output residual 需要 --multi-stems")
+    if args.overlap_review_threshold is not None and (
+        not args.multi_stems or args.split_mode != "diarize_bss"
+        or not 0 < args.overlap_review_threshold < 1
+    ):
+        p.error("--overlap-review-threshold 需要多轨 diarize_bss 模式，且取值介于 0 和 1 之间")
+    if (args.overlap_tracking or args.save_overlap_review) and (
+        not args.multi_stems or args.split_mode != "diarize_bss"
+    ):
+        p.error("叠话联合归属和复核音频需要多轨 diarize_bss 模式")
 
     if args.multi_stems and args.split_mode not in ("diarize", "diarize_bss"):
         print(
@@ -322,14 +372,32 @@ def main(argv=None) -> int:
         ),
     }
 
-    with tempfile.TemporaryDirectory(prefix="v2t_stems_") as tmp:
+    with (collect_performance(args.performance_report, src, out_dir, stem),
+          use_cache(args.cache_dir), tempfile.TemporaryDirectory(prefix="v2t_stems_") as tmp):
         work = Path(tmp)
-        if src.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}:
-            audio_wav = src
-        else:
-            audio_wav = work / "source.wav"
-            print(f"提取音轨: {src.name}")
-            extract_stereo_audio(src, audio_wav)
+
+        def prepare_audio():
+            if src.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}:
+                audio_wav = src
+            else:
+                audio_wav = work / "source.wav"
+                print(f"提取音轨: {src.name}")
+                with stage("decode"):
+                    cache = get_cache()
+                    if cache is None:
+                        extract_stereo_audio(src, audio_wav)
+                    else:
+                        signature = {"input": cache.fingerprint(src),
+                                     "ffmpeg": cache.fingerprint(Path(_require_ffmpeg())),
+                                     "format": "stereo-44100-pcm-v1"}
+                        (audio_wav,) = cache.files(
+                            "decode", signature, ("source.wav",),
+                            lambda directory: extract_stereo_audio(src, directory / "source.wav"),
+                        )
+            record_audio_duration(audio_wav)
+            return audio_wav
+
+        audio_wav = None if args.cache_results else prepare_audio()
 
         if args.count_speakers:
             import json
@@ -338,7 +406,8 @@ def main(argv=None) -> int:
                 instrumental, vocals = _separate_vocal_stems(
                     audio_wav, work, **roformer_kwargs
                 )
-            except RuntimeError as exc:
+            except (RuntimeError, ValueError) as exc:
+                mark_failed()
                 print(str(exc), file=sys.stderr)
                 return 2
 
@@ -366,10 +435,11 @@ def main(argv=None) -> int:
             return 0
 
         if args.multi_stems:
-            try:
+            def build(destination):
+                input_audio = prepare_audio() if args.cache_results else audio_wav
                 separate_multi_stems(
-                    audio_wav,
-                    out_dir,
+                    input_audio,
+                    destination,
                     stem,
                     work,
                     split_mode=args.split_mode,
@@ -377,9 +447,12 @@ def main(argv=None) -> int:
                     max_speakers=args.max_speakers,
                     hf_token=args.hf_token,
                     diarization_model=args.diarization_model,
+                    diarization_source=args.diarization_source,
                     embedding_model=args.embedding_model,
                     use_embedding=not args.no_embedding,
                     bss_backend=args.bss_backend,
+                    overlap_tracking=args.overlap_tracking,
+                    save_overlap_review=args.save_overlap_review,
                     refine_embedding=args.refine_embedding,
                     merge_turn_gap=args.merge_turn_gap,
                     min_turn_sec=args.min_turn_sec,
@@ -388,6 +461,7 @@ def main(argv=None) -> int:
                     diarize_preprocess=args.diarize_preprocess,
                     overlap_min_sec=args.overlap_min_sec,
                     max_overlap_sec=args.max_overlap_sec,
+                    overlap_review_threshold=args.overlap_review_threshold,
                     drop_low_confidence=args.drop_low_confidence,
                     stem_min_similarity=args.stem_min_similarity,
                     stem_relabel_margin=args.stem_relabel_margin,
@@ -399,10 +473,30 @@ def main(argv=None) -> int:
                     roformer_inst_model=args.roformer_inst_model,
                     roformer_overlap=args.roformer_overlap,
                     roformer_model_dir=roformer_kwargs["roformer_model_dir"],
+                    background_output=args.background_output,
                 )
-            except (RuntimeError, ValueError) as exc:
+
+            try:
+                with publish_directory(out_dir, args.atomic_output) as destination:
+                    if args.cache_results:
+                        from video2text.result_cache import render_cached_result
+
+                        ignored = {"input", "out_dir", "cache_dir", "cache_results", "performance_report",
+                                   "atomic_output", "hf_token"}
+                        settings = {
+                            name: str(value) if isinstance(value, Path) else value
+                            for name, value in vars(args).items() if name not in ignored
+                        }
+                        settings["stem"] = stem
+                        render_cached_result(get_cache(), src, destination, settings, _require_ffmpeg(), build)
+                    else:
+                        build(destination)
+            except (RuntimeError, ValueError, OSError) as exc:
+                mark_failed()
                 print(str(exc), file=sys.stderr)
                 return 2
+            if args.atomic_output:
+                print(f"已发布: {out_dir}")
             return 0
 
         if args.three_stems:
@@ -437,12 +531,18 @@ def main(argv=None) -> int:
                     ),
                 )
             except (RuntimeError, ValueError) as exc:
+                mark_failed()
                 print(str(exc), file=sys.stderr)
                 return 2
             return 0
 
         print(f"{_roformer_backend_label(args)} 人声分离...")
-        instrumental, vocals = _separate_vocal_stems(audio_wav, work, **roformer_kwargs)
+        try:
+            instrumental, vocals = _separate_vocal_stems(audio_wav, work, **roformer_kwargs)
+        except (RuntimeError, ValueError) as exc:
+            mark_failed()
+            print(str(exc), file=sys.stderr)
+            return 2
 
         vocals_out = out_dir / f"{stem}_vocals.wav"
         bgm_out = out_dir / f"{stem}_no_vocals.wav"

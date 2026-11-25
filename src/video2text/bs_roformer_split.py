@@ -1,14 +1,18 @@
 """BS-RoFormer / Mel-Band RoFormer vocal separation via audio-separator."""
 from __future__ import annotations
 
+from contextvars import ContextVar
 import json
 import os
 import re
 import shutil
 from importlib import resources
 from pathlib import Path
+from zipfile import is_zipfile
 
 from video2text.paths import roformer_model_dir as _default_roformer_dir
+from video2text.performance import cache_event, stage
+from video2text.stage_cache import model_artifacts
 
 DEFAULT_ROFORMER_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 DEFAULT_ROFORMER_VOCALS_MODEL = "bs_roformer_vocals_revive_v3e_unwa.ckpt"
@@ -20,11 +24,21 @@ ROFORMER_MODEL_DIR_ENV = "VIDEO2TEXT_ROFORMER_MODEL_DIR"
 _STEM_LABEL_RE = re.compile(r"_\(([^)]+)\)_")
 _BUNDLED_ROFORMER_DIR = Path(__file__).resolve().parents[2] / "assets" / "roformer"
 _BUNDLED_DOWNLOAD_CHECKS = _BUNDLED_ROFORMER_DIR / "download_checks.json"
+_worker_models = ContextVar("video2text_roformer_worker", default=None)
+
+
+def enable_cpu_model_reuse() -> None:
+    """Retain one single-checkpoint separator per serial CPU worker."""
+    _worker_models.set({})
 
 
 def default_roformer_model_dir() -> Path:
     """默认持久化模型目录: 项目 models/roformer。"""
     return _default_roformer_dir()
+
+
+def requested_roformer_precision() -> str:
+    return os.environ.get("VIDEO2TEXT_ROFORMER_PRECISION", "fp32").strip().lower()
 
 
 def resolve_roformer_model_dir(model_dir: Path | str | None = None) -> Path:
@@ -152,6 +166,7 @@ def _make_separator(
     ensemble_preset: str | None = None,
     overlap: int | None = None,
     output_format: str = "wav",
+    native_fp16: bool = False,
 ):
     ensure_download_checks_manifest(model_dir)
     Separator = _require_audio_separator()
@@ -170,6 +185,8 @@ def _make_separator(
     }
     if ensemble_preset:
         kwargs["ensemble_preset"] = ensemble_preset
+    if native_fp16:
+        kwargs["use_native_fp16"] = True
     return Separator(**kwargs)
 
 
@@ -283,9 +300,17 @@ def _is_artifact_complete(path: Path, expected_size: int | None) -> bool:
     if not path.is_file():
         return False
     size = path.stat().st_size
-    if expected_size is not None:
-        return size == expected_size
-    return size >= _min_size_for(path.name)
+    if expected_size is None and size < _min_size_for(path.name):
+        return False
+    if expected_size is not None and size != expected_size:
+        return False
+    if path.suffix.lower() in {".ckpt", ".pth", ".th"}:
+        with path.open("rb") as file:
+            # PyTorch also accepts legacy non-ZIP checkpoints. For ZIP checkpoints,
+            # a missing central directory identifies an interrupted download locally.
+            if file.read(4) == b"PK\x03\x04":
+                return is_zipfile(file)
+    return True
 
 
 def ensure_bundled_model_yaml(model_dir: Path, yaml_name: str) -> Path | None:
@@ -406,6 +431,8 @@ def _ensure_model_artifacts_cached(
     separator, model_dir: Path, model_filename: str
 ) -> None:
     artifacts = _collect_model_artifacts(separator, model_filename)
+    if all(_is_artifact_complete(model_dir / name, None) for name, _ in artifacts):
+        return
     yaml_artifacts = [(n, u) for n, u in artifacts if n.endswith(".yaml")]
     ckpt_artifacts = [(n, u) for n, u in artifacts if not n.endswith(".yaml")]
 
@@ -494,38 +521,63 @@ def _run_single_separation(
     overlap: int | None = None,
     output_format: str = "wav",
     run_label: str = "",
+    native_fp16: bool = False,
 ) -> tuple[Path, Path]:
     out_dir = work_dir / "bs_roformer"
     if run_label:
         out_dir = work_dir / f"bs_roformer_{run_label}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    separator = _make_separator(
-        out_dir,
-        model_dir,
-        ensemble_preset=ensemble_preset,
-        overlap=overlap,
-        output_format=output_format,
-    )
+    session = _worker_models.get()
+    if session is not None:
+        import torch
+
+        if ensemble_preset or run_label or torch.cuda.is_available():
+            session = None
+    key = None
+    if session is not None:
+        key = (model_artifacts(model_dir), model_filename, overlap, output_format)
+    reused = session is not None and session.get("key") == key and "separator" in session
+    if session is not None:
+        cache_event("roformer_model", reused)
+    if reused:
+        separator = session["separator"]
+        separator.output_dir = str(out_dir)
+        separator.model_instance.output_dir = str(out_dir)
+    else:
+        if session is not None:
+            session.clear()
+        separator = _make_separator(
+            out_dir, model_dir, ensemble_preset=ensemble_preset,
+            overlap=overlap, output_format=output_format, native_fp16=native_fp16,
+        )
     load_name = model_filename
     if ensemble_preset:
         print(f"  ensemble preset: {ensemble_preset}")
     else:
         print(f"  model: {model_filename}")
     print(f"  模型目录: {model_dir}")
-    if ensemble_preset:
-        for ckpt in _ensemble_ckpt_filenames(ensemble_preset):
-            _ensure_model_artifacts_cached(separator, model_dir, ckpt)
-    else:
-        _ensure_model_artifacts_cached(separator, model_dir, model_filename)
-    _load_model_safe(separator, load_name, model_dir=model_dir)
+    if not reused:
+        with stage("load_roformer_model"):
+            with stage("verify_roformer_artifacts"):
+                checkpoints = _ensemble_ckpt_filenames(ensemble_preset) if ensemble_preset else (model_filename,)
+                for ckpt in checkpoints:
+                    _ensure_model_artifacts_cached(separator, model_dir, ckpt)
+            _load_model_safe(separator, load_name, model_dir=model_dir)
+            if native_fp16 and separator.effective_precision != "native_fp16":
+                raise RuntimeError(f"模型 {model_filename} 不支持在当前设备上使用原生 FP16")
     try:
         outputs = separator.separate(str(audio_wav))
     except Exception as exc:
+        if session is not None:
+            session.clear()
         _raise_if_network_error(exc, model_dir=model_dir)
         raise
     if not outputs:
         raise RuntimeError("BS-RoFormer 未返回任何输出文件")
+    if session is not None and not reused:
+        session.update(key=(model_artifacts(model_dir), model_filename, overlap, output_format),
+                       separator=separator)
     output_paths = _resolve_output_paths(outputs, out_dir)
     return _stems_from_outputs(output_paths)
 
@@ -542,6 +594,7 @@ def separate_vocals_bs_roformer(
     overlap: int | None = None,
     output_format: str = "wav",
     model_dir: Path | str | None = None,
+    precision: str = "fp32",
 ) -> tuple[Path, Path]:
     """
     RoFormer 双轨分离: 返回 (instrumental/no_vocals, vocals)。
@@ -558,6 +611,10 @@ def separate_vocals_bs_roformer(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mode = roformer_mode.lower().strip()
+    if precision not in ("fp32", "fp16"):
+        raise ValueError("VIDEO2TEXT_ROFORMER_PRECISION 需要是 fp32 或 fp16")
+    if precision == "fp16" and (mode != "single" or device != "cuda"):
+        raise ValueError("RoFormer FP16 需要 CUDA 和 --roformer-mode single")
 
     if mode == "ensemble":
         preset = ensemble_preset or DEFAULT_ROFORMER_ENSEMBLE_PRESET
@@ -614,7 +671,7 @@ def separate_vocals_bs_roformer(
 
     print(
         f"分离人声与背景音乐 (RoFormer {model_filename}, "
-        f"overlap={overlap or 'default'}, device={device})..."
+        f"overlap={overlap or 'default'}, device={device}, precision={precision})..."
     )
     return _run_single_separation(
         audio_wav,
@@ -623,4 +680,5 @@ def separate_vocals_bs_roformer(
         model_filename,
         overlap=overlap,
         output_format=output_format,
+        native_fp16=precision == "fp16",
     )

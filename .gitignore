@@ -6,3 +6,5 @@ src/cli/__pycache__/*
 src/video2text/__pycache__/*
 *.log
 **/hf_token
+/models/speechbrain/sepformer-wsj03mix/
+/models/speechbrain/sepformer-whamr/

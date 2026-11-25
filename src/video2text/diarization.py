@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, field
+from functools import lru_cache
+import json
 from pathlib import Path
+from threading import RLock
 
 import numpy as np
 
-from video2text.paths import ensure_huggingface_env, repo_root
+from video2text.performance import timed_stage
+from video2text.paths import ensure_huggingface_env, huggingface_hub_cache, repo_root
+from video2text.stage_cache import get_cache, inference_environment, model_artifacts, versions
 
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 LEGACY_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 HF_TOKEN_FILE_ENV = "VIDEO2TEXT_HF_TOKEN_FILE"
+_pipeline_lock = RLock()
 
 
 @dataclass
@@ -27,6 +34,7 @@ class OverlapRegion:
     start: float
     end: float
     speaker_ids: list[str] = field(default_factory=list)
+    reason: str | None = None
 
 
 @dataclass
@@ -36,6 +44,7 @@ class DiarizationResult:
     model: str
     speaker_ids: list[str] = field(default_factory=list)
     overlap_detection_source: str = "timeline"
+    overlap_review_regions: list[OverlapRegion] = field(default_factory=list)
 
 
 def _hf_token_search_paths() -> list[Path]:
@@ -94,6 +103,8 @@ def _ensure_hf_hub_env() -> None:
     ensure_huggingface_env()
 
 
+@lru_cache(maxsize=1)
+@timed_stage("load_diarization_model")
 def _load_diarization_pipeline(model_id: str, token: str):
     _ensure_hf_hub_env()
     try:
@@ -282,6 +293,101 @@ def detect_proximity_overlap_candidates(
     return _merge_overlap_regions(regions)
 
 
+def _posterior_review_regions(pipeline, audio: Path, threshold: float, min_sec: float):
+    """从 powerset 模型的多人类别后验补充待复核区间。"""
+    segmentation = getattr(pipeline, "_segmentation", None)
+    conversion = getattr(segmentation, "conversion", None)
+    if not hasattr(conversion, "mapping"):
+        return []
+
+    from pyannote.audio import Inference
+
+    overlap_classes = conversion.mapping.sum(dim=-1).cpu().numpy() >= 2
+
+    def overlap_probability(log_probs):
+        return np.exp(log_probs[..., overlap_classes]).sum(axis=-1, keepdims=True)
+
+    inference = Inference(
+        segmentation.model, duration=segmentation.duration, step=segmentation.step,
+        device=segmentation.device, batch_size=segmentation.batch_size,
+        skip_conversion=True, pre_aggregation_hook=overlap_probability,
+    )
+    posterior = inference(str(audio))
+    window = posterior.sliding_window
+    start = window.start + (window.duration - window.step) / 2
+    return _threshold_overlap_posterior(posterior.data[:, 0], start, window.step, threshold, min_sec)
+
+
+def _threshold_overlap_posterior(scores, start, step, threshold, min_sec):
+    boundaries = np.flatnonzero(np.diff(np.r_[False, scores >= threshold, False]))
+    regions = []
+    for left, right in boundaries.reshape(-1, 2):
+        begin = max(0.0, start + left * step)
+        end = start + right * step
+        if end - begin >= min_sec:
+            regions.append(OverlapRegion(begin, end))
+    return regions
+
+
+def _activity_sweep(left, right):
+    events = defaultdict(list)
+    for side, spans in enumerate((left, right)):
+        for start, end, labels in spans:
+            for label in labels:
+                events[start].append((side, label, 1))
+                events[end].append((side, label, -1))
+    active = [Counter(), Counter()]
+    times = sorted(events)
+    for start, end in zip(times, times[1:]):
+        for side, label, count in events[start]:
+            active[side][label] += count
+            if not active[side][label]:
+                del active[side][label]
+        yield start, end, set(active[0]), set(active[1])
+
+
+def fuse_diarization(mix: DiarizationResult, vocals: DiarizationResult) -> DiarizationResult:
+    """保留原混音的角色时间轴，用两路检测的一致性决定是否自动分离。"""
+    from scipy.optimize import linear_sum_assignment
+
+    if not mix.turns:
+        return vocals
+    mix_regions = mix.overlap_regions if mix.overlap_detection_source != "proximity" else []
+    vocal_regions = vocals.overlap_regions if vocals.overlap_detection_source != "proximity" else []
+    names = [sorted({t.speaker_id for t in result.turns}) for result in (mix, vocals)]
+    affinity = np.zeros(tuple(map(len, names)))
+    mix_index, vocal_index = ({name: i for i, name in enumerate(group)} for group in names)
+    # Only unambiguous activity contributes to the cross-view speaker mapping.
+    solo_spans = ([(t.start, t.end, [t.speaker_id]) for t in result.turns]
+                  for result in (mix, vocals))
+    for left, right, a, b in _activity_sweep(*solo_spans):
+        if len(a) == len(b) == 1:
+            affinity[mix_index[a.pop()], vocal_index[b.pop()]] += right - left
+    rows, columns = linear_sum_assignment(affinity, maximize=True)
+    mapping = {names[1][j]: names[0][i] for i, j in zip(rows, columns) if affinity[i, j] >= 0.25}
+
+    confirmed, review = [], []
+    overlap_spans = ([(r.start, r.end, r.speaker_ids or [None]) for r in regions]
+                     for regions in (mix_regions, vocal_regions))
+    for left, right, a, b in _activity_sweep(*overlap_spans):
+        if not (a or b):
+            continue
+        if None not in a and len(a) in (2, 3) and a == {mapping.get(s) for s in b}:
+            destination, speakers, reason = confirmed, sorted(a), None
+        else:
+            destination, speakers, reason = review, sorted(a - {None}), "joint_disagreement"
+        if (destination and destination[-1].end == left
+                and destination[-1].speaker_ids == speakers and destination[-1].reason == reason):
+            destination[-1].end = right
+        else:
+            destination.append(OverlapRegion(left, right, speakers, reason))
+    return DiarizationResult(
+        mix.turns, confirmed, mix.model, mix.speaker_ids, "joint",
+        review + mix.overlap_review_regions + vocals.overlap_review_regions,
+    )
+
+
+@timed_stage("diarization")
 def run_diarization(
     vocals_path: Path,
     *,
@@ -292,6 +398,48 @@ def run_diarization(
     diarize_preprocess: bool = True,
     work_dir: Path | None = None,
     overlap_min_sec: float = 0.15,
+    overlap_review_threshold: float | None = None,
+) -> DiarizationResult:
+    options = dict(
+        min_speakers=min_speakers, max_speakers=max_speakers, model_id=model_id,
+        diarize_preprocess=diarize_preprocess, overlap_min_sec=overlap_min_sec,
+        overlap_review_threshold=overlap_review_threshold,
+    )
+    cache = get_cache()
+    if cache is None:
+        return _infer_diarization(vocals_path, hf_token=hf_token, work_dir=work_dir, **options)
+    local = Path(model_id).expanduser()
+    model_root = local if local.exists() else huggingface_hub_cache() / ("models--" + model_id.replace("/", "--"))
+    signature = {
+        "input": cache.fingerprint(vocals_path), "options": options,
+        "preprocess_applied": diarize_preprocess and work_dir is not None,
+        "weights": model_artifacts(model_root),
+        "code": cache.fingerprint(Path(__file__)),
+        "packages": versions("pyannote.audio", "torch", "librosa", "soundfile"),
+        "environment": inference_environment(),
+    }
+
+    def build(directory):
+        result = _infer_diarization(vocals_path, hf_token=hf_token, work_dir=work_dir, **options)
+        (directory / "timeline.json").write_text(json.dumps(asdict(result)), encoding="utf-8")
+
+    def read(directory):
+        return json.loads((directory / "timeline.json").read_text(encoding="utf-8"))
+
+    (artifact,) = cache.files(
+        "diarization", signature, ("timeline.json",), build,
+        validate=lambda directory: "turns" in read(directory),
+    )
+    payload = read(artifact.parent)
+    payload["turns"] = [DiarizationTurn(**turn) for turn in payload["turns"]]
+    for field in ("overlap_regions", "overlap_review_regions"):
+        payload[field] = [OverlapRegion(**row) for row in payload[field]]
+    return DiarizationResult(**payload)
+
+
+def _infer_diarization(
+    vocals_path: Path, *, hf_token, work_dir, min_speakers, max_speakers,
+    model_id, diarize_preprocess, overlap_min_sec, overlap_review_threshold,
 ) -> DiarizationResult:
     """运行 pyannote 日记化, 返回说话片段与重叠区间。"""
     token = _resolve_hf_token(hf_token)
@@ -304,15 +452,20 @@ def run_diarization(
         diarize_input = prepare_diarization_audio(vocals_path, work_dir)
         print(f"  日记化预处理: {diarize_input.name}")
 
-    pipeline = _load_diarization_pipeline(model_id, token)
-    try:
-        output = pipeline(
-            str(diarize_input),
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
+    with _pipeline_lock:
+        pipeline = _load_diarization_pipeline(model_id, token)
+        try:
+            output = pipeline(
+                str(diarize_input),
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
+        except TypeError:
+            output = pipeline(str(diarize_input))
+        posterior_regions = (
+            _posterior_review_regions(pipeline, diarize_input, overlap_review_threshold, overlap_min_sec)
+            if overlap_review_threshold is not None else []
         )
-    except TypeError:
-        output = pipeline(str(diarize_input))
 
     turns: list[DiarizationTurn] = []
     for start, end, speaker in _iter_diarization_output(output):
@@ -323,18 +476,17 @@ def run_diarization(
 
     speaker_ids = sorted({t.speaker_id for t in turns})
     overlap_source = "timeline"
-    native = _extract_native_overlap(output)
-    if native:
-        overlap_regions = _merge_overlap_regions(native)
-        overlap_source = "native"
-    else:
-        overlap_regions = detect_overlap_regions(turns, min_overlap_sec=overlap_min_sec)
-        if not overlap_regions:
-            proximity = detect_proximity_overlap_candidates(
+    overlap_regions = detect_overlap_regions(turns, min_overlap_sec=0.0)
+    if not overlap_regions:
+        native = _extract_native_overlap(output)
+        if native:
+            overlap_regions = _merge_overlap_regions(native)
+            overlap_source = "native"
+        else:
+            overlap_regions = detect_proximity_overlap_candidates(
                 turns, min_overlap_sec=overlap_min_sec
             )
-            if proximity:
-                overlap_regions = proximity
+            if overlap_regions:
                 overlap_source = "proximity"
     return DiarizationResult(
         turns=turns,
@@ -342,6 +494,7 @@ def run_diarization(
         model=model_id,
         speaker_ids=speaker_ids,
         overlap_detection_source=overlap_source,
+        overlap_review_regions=posterior_regions,
     )
 
 
@@ -370,15 +523,10 @@ def detect_overlap_regions(
     for t, delta, speaker in events:
         if prev_t is not None and t > prev_t:
             speakers = active_speakers()
-            if len(speakers) >= 2 and (t - prev_t) >= min_overlap_sec:
-                if overlap_regions and overlap_regions[-1].end >= prev_t - 1e-6:
-                    region = overlap_regions[-1]
-                    merged = sorted(set(region.speaker_ids) | set(speakers))
-                    overlap_regions[-1] = OverlapRegion(
-                        start=region.start,
-                        end=t,
-                        speaker_ids=merged,
-                    )
+            if len(speakers) >= 2:
+                if (overlap_regions and overlap_regions[-1].end == prev_t
+                        and overlap_regions[-1].speaker_ids == speakers):
+                    overlap_regions[-1].end = t
                 else:
                     overlap_regions.append(
                         OverlapRegion(start=prev_t, end=t, speaker_ids=speakers)
@@ -388,7 +536,7 @@ def detect_overlap_regions(
             active.pop(speaker, None)
         prev_t = t
 
-    return overlap_regions
+    return [r for r in overlap_regions if r.end - r.start >= min_overlap_sec]
 
 
 def turns_to_assignments(turns: list[DiarizationTurn]) -> tuple[list[dict], list[dict]]:

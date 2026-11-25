@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import shutil
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
+from video2text.performance import timed_stage
+from video2text.stage_cache import get_cache, inference_environment, model_artifacts, versions
 from video2text.ffmpeg_util import extract_stereo_audio
 from video2text.gender_split import split_vocals_by_gender
 from video2text.media import _extract_audio_clip, get_media_duration
@@ -17,6 +20,8 @@ from video2text.bs_roformer_split import (
     DEFAULT_ROFORMER_MODE,
     DEFAULT_ROFORMER_MODEL,
     DEFAULT_ROFORMER_VOCALS_MODEL,
+    requested_roformer_precision,
+    resolve_roformer_model_dir,
     separate_vocals_bs_roformer,
 )
 
@@ -138,9 +143,13 @@ def _build_roformer_meta(
         meta["model"] = roformer_model
     if overlap is not None:
         meta["overlap"] = overlap
+    precision = requested_roformer_precision()
+    if precision != "fp32":
+        meta["precision"] = precision
     return meta
 
 
+@timed_stage("roformer")
 def _separate_vocal_stems(
     audio_wav: Path,
     work_dir: Path,
@@ -154,9 +163,7 @@ def _separate_vocal_stems(
     roformer_model_dir: Path | str | None = None,
 ) -> tuple[Path, Path]:
     """BS-RoFormer 双轨分离: 返回 (no_vocals/instrumental, vocals)。"""
-    return separate_vocals_bs_roformer(
-        audio_wav,
-        work_dir,
+    options = dict(
         model_filename=roformer_model,
         roformer_mode=roformer_mode,
         ensemble_preset=roformer_ensemble_preset,
@@ -164,7 +171,27 @@ def _separate_vocal_stems(
         inst_model=roformer_inst_model,
         overlap=roformer_overlap,
         model_dir=roformer_model_dir,
+        precision=requested_roformer_precision(),
     )
+    cache = get_cache()
+    if cache is None:
+        return separate_vocals_bs_roformer(audio_wav, work_dir, **options)
+    model_dir = resolve_roformer_model_dir(roformer_model_dir)
+    settings = {**options, "model_dir": str(model_dir)}
+    signature = {
+        "input": cache.fingerprint(audio_wav),
+        "settings": settings,
+        "weights": model_artifacts(model_dir),
+        "packages": versions("audio-separator", "torch", "librosa", "soundfile"),
+        "environment": inference_environment(),
+    }
+
+    def build(directory):
+        background, vocals = separate_vocals_bs_roformer(audio_wav, work_dir, **options)
+        shutil.copyfile(background, directory / "background.wav")
+        shutil.copyfile(vocals, directory / "vocals.wav")
+
+    return cache.files("roformer", signature, ("background.wav", "vocals.wav"), build)
 
 
 def separate_three_stems(
@@ -256,6 +283,43 @@ def separate_three_stems(
     )
 
 
+@timed_stage("residual_background")
+def _write_residual_background(original: Path, vocals: Path, output: Path) -> None:
+    import numpy as np
+    import soundfile as sf
+
+    from video2text.f0_analysis import load_vocals_stereo
+
+    sr = 44100
+    with ExitStack() as stack:
+        try:
+            original_stream = stack.enter_context(sf.SoundFile(original))
+            dialogue_stream = stack.enter_context(sf.SoundFile(vocals))
+        except RuntimeError:
+            original_stream = dialogue_stream = None
+        if (original_stream is not None and dialogue_stream is not None
+                and original_stream.samplerate == dialogue_stream.samplerate == sr):
+            if abs(dialogue_stream.frames - original_stream.frames) > round(0.05 * sr):
+                raise ValueError("原混音和人声轨长度差超过 50 ms，无法直接相减")
+            with sf.SoundFile(output, "w", sr, 2, subtype="FLOAT") as out:
+                for dialogue in dialogue_stream.blocks(blocksize=1 << 18, dtype="float32", always_2d=True):
+                    mix = original_stream.read(len(dialogue), dtype="float32", always_2d=True)
+                    mix = np.pad(mix, ((0, len(dialogue) - len(mix)), (0, 0)))
+                    if dialogue.shape[1] == mix.shape[1] == 1:
+                        mono = mix - dialogue
+                        out.write(np.repeat(mono, 2, axis=1))
+                    else:
+                        out.write(mix[:, :2] - dialogue[:, :2])
+            return
+    mix = np.stack(load_vocals_stereo(original, sr=sr), axis=1)
+    dialogue = np.stack(load_vocals_stereo(vocals, sr=sr), axis=1)
+    difference = len(dialogue) - len(mix)
+    if abs(difference) > round(0.05 * sr):
+        raise ValueError("原混音和人声轨长度差超过 50 ms，无法直接相减")
+    aligned = np.pad(mix[:len(dialogue)], ((0, max(0, difference)), (0, 0)))
+    sf.write(output, aligned - dialogue, sr, subtype="FLOAT")
+
+
 def separate_multi_stems(
     audio_wav: Path,
     out_dir: Path,
@@ -267,9 +331,12 @@ def separate_multi_stems(
     max_speakers: int = 4,
     hf_token: str | None = None,
     diarization_model: str = DEFAULT_DIARIZATION_MODEL,
+    diarization_source: str = "vocals",
     embedding_model: str = DEFAULT_ANIME_EMBEDDING_MODEL,
     use_embedding: bool = True,
     bss_backend: str = "auto",
+    overlap_tracking: bool = False,
+    save_overlap_review: bool = False,
     refine_embedding: bool = True,
     merge_turn_gap: float = 0.4,
     min_turn_sec: float = 0.5,
@@ -278,6 +345,7 @@ def separate_multi_stems(
     diarize_preprocess: bool = True,
     overlap_min_sec: float = 0.15,
     max_overlap_sec: float = 8.0,
+    overlap_review_threshold: float | None = None,
     drop_low_confidence: bool = False,
     stem_min_similarity: float = 0.30,
     stem_relabel_margin: float = 0.08,
@@ -289,12 +357,15 @@ def separate_multi_stems(
     roformer_inst_model: str | None = None,
     roformer_overlap: int | None = None,
     roformer_model_dir: Path | str | None = None,
+    background_output: str = "direct",
 ) -> MultiStemResult:
     """分离背景/人声, 再按日记化输出 N 条 speaker 轨。"""
     if split_mode not in ("diarize", "diarize_bss"):
         raise ValueError(
             f"multi-stems 仅支持 diarize/diarize_bss, 收到: {split_mode}"
         )
+    if background_output not in ("direct", "residual"):
+        raise ValueError(f"未知的背景输出方式: {background_output}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     instrumental, vocals = _separate_vocal_stems(
@@ -322,7 +393,11 @@ def separate_multi_stems(
     vocals_out = out_dir / f"{stem}_vocals.wav"
     report_out = out_dir / f"{stem}_split_report.json"
 
-    shutil.copy2(instrumental, bgm_out)
+    if background_output == "residual":
+        _write_residual_background(audio_wav, vocals, bgm_out)
+    else:
+        shutil.copy2(instrumental, bgm_out)
+    separator_meta["background_output"] = background_output
     shutil.copy2(vocals, vocals_out)
     print(f"已写入: {bgm_out}")
     print(f"已写入: {vocals_out}")
@@ -333,6 +408,8 @@ def separate_multi_stems(
         stem,
         report_out,
         split_mode=split_mode,
+        original_audio_path=audio_wav,
+        diarization_source=diarization_source,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         hf_token=hf_token,
@@ -340,6 +417,8 @@ def separate_multi_stems(
         embedding_model=embedding_model,
         use_embedding=use_embedding,
         bss_backend=bss_backend,
+        overlap_tracking=overlap_tracking,
+        save_overlap_review=save_overlap_review,
         work_dir=work_dir,
         separator_meta=separator_meta,
         refine_embedding=refine_embedding,
@@ -350,6 +429,7 @@ def separate_multi_stems(
         diarize_preprocess=diarize_preprocess,
         overlap_min_sec=overlap_min_sec,
         max_overlap_sec=max_overlap_sec,
+        overlap_review_threshold=overlap_review_threshold,
         drop_low_confidence=drop_low_confidence,
         stem_min_similarity=stem_min_similarity,
         stem_relabel_margin=stem_relabel_margin,
